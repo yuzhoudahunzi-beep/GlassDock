@@ -16,6 +16,8 @@
 #include <cwchar>
 #include <cstdlib>
 #include <cmath>
+#include <stdarg.h>
+#include <winreg.h>
 
 #include "crisptext.h"
 
@@ -38,7 +40,7 @@ static int S(int v){ return (int)(v * g_scale + 0.5f); }
 // ---------------- config ----------------
 struct Config {
     std::wstring folder;
-    int width = 420, height = 560;
+    int width = 420, height = 611;
     int x = -1, y = -1;
     int opacity = 36;              // 0..100  tint strength (100 = solid color)
     COLORREF accent = RGB(128, 128, 128);   // neutral grey: pure glass, no colour cast
@@ -47,6 +49,7 @@ struct Config {
     bool foldersFirst = true;
     bool showExt = true;
     int refreshHz = 60;            // live drag/resize refresh rate (30..240 Hz)
+    bool debugLog = false;         // P7: opt-in diagnostics (%APPDATA%\GlassDock\p7.log)
 };
 static Config cfg;
 static std::wstring g_cfgFile;
@@ -109,6 +112,39 @@ static std::wstring HexColor(COLORREF c){
     return buf;
 }
 
+// ---------------- P7 diagnostics (opt-in, off by default) ----------------
+static bool g_diagEnabled = false;
+
+// Appends one line to %APPDATA%\GlassDock\p7.log. Only state transitions are logged
+// (host changes, placement results, recovery, shell restart) — never per-second noise.
+static void DiagLog(const wchar_t* fmt, ...){
+    if (!g_diagEnabled) return;
+    wchar_t text[512];
+    va_list ap; va_start(ap, fmt);
+    vswprintf(text, 512, fmt, ap);
+    va_end(ap);
+    std::wstring dir = AppDataDir();
+    CreateDirectoryW(dir.c_str(), NULL);
+    std::wstring path = dir + L"\\p7.log";
+    HANDLE h = CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ, NULL,
+                           OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return;
+    DWORD size = GetFileSize(h, NULL);
+    if (size > 256 * 1024){
+        CloseHandle(h);
+        h = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, NULL,
+                        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (h == INVALID_HANDLE_VALUE) return;
+        DWORD bom = 0xFEFF, w = 0;
+        WriteFile(h, &bom, sizeof(bom), &w, NULL);
+    }
+    wchar_t line[576];
+    wsprintfW(line, L"[%lu] %s\r\n", GetTickCount(), text);
+    DWORD len = (DWORD)(wcslen(line) * sizeof(wchar_t)), written = 0;
+    WriteFile(h, line, len, &written, NULL);
+    CloseHandle(h);
+}
+
 static void LoadConfig(){
     CreateDirectoryW(AppDataDir().c_str(), NULL);
     g_cfgFile = AppDataDir() + L"\\config.ini";
@@ -120,7 +156,7 @@ static void LoadConfig(){
         else cfg.folder = L"C:\\";
     }
     cfg.width   = GetIniInt(L"width", 420);
-    cfg.height  = GetIniInt(L"height", 560);
+    cfg.height  = GetIniInt(L"height", 611);
     cfg.x       = GetIniInt(L"x", -1);
     cfg.y       = GetIniInt(L"y", -1);
     cfg.opacity = GetIniInt(L"opacity", 36);
@@ -129,7 +165,7 @@ static void LoadConfig(){
     cfg.autostart = GetIniInt(L"autostart", 0) != 0;
     cfg.foldersFirst = GetIniInt(L"foldersFirst", 1) != 0;
     cfg.showExt = GetIniInt(L"showExt", 1) != 0;
-    cfg.refreshHz = GetIniInt(L"refreshHz", 60);
+    cfg.refreshHz = 60;   // fixed at 60 Hz; the picker was removed by user request
 
     if (cfg.width  < 200) cfg.width  = 200;
     if (cfg.height < 160) cfg.height = 160;
@@ -139,6 +175,7 @@ static void LoadConfig(){
     if (cfg.opacity > 100) cfg.opacity = 100;
     if (cfg.refreshHz < 30) cfg.refreshHz = 30;
     if (cfg.refreshHz > 240) cfg.refreshHz = 240;
+    cfg.debugLog = GetIniInt(L"debugLog", 0) != 0;   // P7: ini-only, never written back
 }
 
 static void SavePos();
@@ -219,30 +256,77 @@ static HFONT HFontFor(Font* f){
     return NULL;
 }
 
-static void InitFonts(){
+// Resolve the font Windows itself uses to draw desktop icon labels
+// (HKCU\Control Panel\Desktop\WindowMetrics\IconFont). That is the "system font" a
+// desktop widget must echo: if the user changed 图标字体 in Display settings, the
+// widget follows automatically instead of inventing its own face/size.
+// Order: IconFont registry value -> SPI_GETICONTITLELOGFONT -> lfMessageFont.
+static bool ReadSystemLabelFont(LOGFONTW& out, bool& fromRegistry){
+    ZeroMemory(&out, sizeof(out));
+    fromRegistry = false;
+    HKEY k = NULL;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Control Panel\\Desktop\\WindowMetrics",
+                      0, KEY_QUERY_VALUE, &k) == ERROR_SUCCESS){
+        LOGFONTW tmp = {0};
+        DWORD cb = sizeof(tmp), type = 0;
+        LONG r = RegQueryValueExW(k, L"IconFont", NULL, &type, (LPBYTE)&tmp, &cb);
+        RegCloseKey(k);
+        if (r == ERROR_SUCCESS && type == REG_BINARY && cb >= sizeof(LOGFONTW)){
+            tmp.lfFaceName[LF_FACESIZE - 1] = 0;
+            if (tmp.lfFaceName[0] && tmp.lfHeight != 0){ out = tmp; fromRegistry = true; return true; }
+        }
+    }
+    // SPI values are already in device pixels for the current DPI; the raw IconFont
+    // registry LOGFONT is not, it is expressed in 96-dpi units.
+    if (SystemParametersInfoW(SPI_GETICONTITLELOGFONT, sizeof(out), &out, 0)){
+        out.lfFaceName[LF_FACESIZE - 1] = 0;
+        if (out.lfFaceName[0] && out.lfHeight != 0) return true;
+    }
     NONCLIENTMETRICSW ncm = {0};
     ncm.cbSize = sizeof(ncm);
-    SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0);
-    LOGFONTW lf = ncm.lfMessageFont;
-    float px = (float)(lf.lfHeight < 0 ? -lf.lfHeight : lf.lfHeight);
-    if (px < 8) px = 12;
+    if (SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0)){
+        out = ncm.lfMessageFont;
+        return out.lfFaceName[0] != 0;
+    }
+    return false;
+}
 
-    FontFamily fam(lf.lfFaceName);
+// strip the trailing spaces some systems leave inside lfFaceName
+static void TrimFace(std::wstring& s){
+    while (!s.empty() && (s.back() == L' ' || s.back() == L'\0')) s.pop_back();
+}
+
+static void InitFonts(){
+    LOGFONTW lf = {0};
+    bool fromRegistry = false;
+    bool got = ReadSystemLabelFont(lf, fromRegistry);
+    // IconFont is stored in 96-dpi units, everything else already comes back scaled
+    float px = (float)(lf.lfHeight < 0 ? -lf.lfHeight : lf.lfHeight);
+    if (got && fromRegistry) px *= g_scale;
+    px *= 0.87f;   // user preference: slightly smaller than the system icon label
+    if (!got || px < 8 || px > 40) px = 12;   // sane fallback when the value is nonsense
+
+    std::wstring faceName(lf.lfFaceName);
+    TrimFace(faceName);
+    if (faceName.empty()) faceName = L"Segoe UI";
+
+    FontFamily fam(faceName.c_str());
     bool useSeg = (fam.GetLastStatus() != Ok);
-    const wchar_t* face = useSeg ? L"Segoe UI" : lf.lfFaceName;
+    const wchar_t* face = useSeg ? L"Segoe UI" : faceName.c_str();
+    float small = px - 1.5f; if (small < 9.0f) small = 9.0f;
     if (useSeg){
         g_fontUi   = new Font(L"Segoe UI", px, FontStyleRegular, UnitPixel);
         g_fontBold = new Font(L"Segoe UI", px, FontStyleBold, UnitPixel);
-        g_fontSmall = new Font(L"Segoe UI", px - 1.5f, FontStyleRegular, UnitPixel);
+        g_fontSmall = new Font(L"Segoe UI", small, FontStyleRegular, UnitPixel);
     } else {
         g_fontUi   = new Font(&fam, px, FontStyleRegular, UnitPixel);
         g_fontBold = new Font(&fam, px, FontStyleBold, UnitPixel);
-        g_fontSmall = new Font(&fam, px - 1.5f, FontStyleRegular, UnitPixel);
+        g_fontSmall = new Font(&fam, small, FontStyleRegular, UnitPixel);
     }
     // GDI twins – same face, same pixel height, hinted grayscale AA
     g_hfUi    = crisp::MakeHFont(face, (int)(px + 0.5f), false);
     g_hfBold  = crisp::MakeHFont(face, (int)(px + 0.5f), true);
-    g_hfSmall = crisp::MakeHFont(face, (int)(px - 1.5f + 0.5f), false);
+    g_hfSmall = crisp::MakeHFont(face, (int)(small + 0.5f), false);
 
     const wchar_t* glyphFace = L"Segoe Fluent Icons";
     {
@@ -257,16 +341,17 @@ static void InitFonts(){
     g_hfWatermark    = crisp::MakeHFont(glyphFace, S(60), false);
 }
 
-// ---------------- background capture / frosted glass ----------------
-// The see-through colour-key. Pixels painted with this colour are made fully
-// transparent by the layered-window colour key, so the live desktop (including
-// Wallpaper Engine's animated wallpaper) shows through. We pick a garish magenta
-// that never occurs in real UI content.
-#define TRANSPARENT_KEY RGB(255, 0, 255)
-
-static Bitmap* g_bg = NULL;          // processed background for the widget
-static Bitmap* g_screenShot = NULL;  // full desktop snapshot (taken with our windows hidden)
-static int g_vx = 0, g_vy = 0, g_vw = 1, g_vh = 1;
+// ---------------- background ----------------
+// True see-through mode: the widget owns no background bitmap at all — DWM composites
+// the live desktop (static wallpaper or Wallpaper Engine's scene) through the per-pixel
+// alpha surface produced by UpdateLayeredWindow. The old "wallpaper snapshot + gaussian
+// blur + tint" pipeline that used to live here is gone: nothing called it any more, and
+// it kept a full-screen bitmap alive for no benefit. Details in docs/PROJECT_GUIDE.md §4.
+//
+// g_desktopLum survives as the luminance input of TextColor(); nothing updates it now,
+// so it stays at the neutral 0.5 and the text is always rendered light. Making it track
+// the real wallpaper needs a luminance source in a see-through window (see §16 of the
+// guide) — until that exists, this is a known limitation, not a bug to "fix" by faking it.
 static float g_desktopLum = 0.5f;
 
 // settings panel state
@@ -281,393 +366,6 @@ static void RoundCorners(HWND h){
     DwmSetWindowAttribute(h, 33 /*DWMWA_WINDOW_CORNER_PREFERENCE*/, &pref, sizeof(pref));
 }
 
-// ---------------- screen capture helpers ----------------
-// Used only by the legacy wallpaper-snapshot fallback path (RefreshDesktopSnapshot's
-// forced re-grab). The main widget and the settings panel are BOTH true see-through
-// layered windows now, so this is not on their hot path.
-
-static Bitmap* CaptureRegion(int sx, int sy, int w, int h){
-    HDC screen = GetDC(NULL);
-    HDC mem = CreateCompatibleDC(screen);
-    HBITMAP bmp = CreateCompatibleBitmap(screen, w, h);
-    HGDIOBJ old = SelectObject(mem, bmp);
-    BitBlt(mem, 0, 0, w, h, screen, sx, sy, SRCCOPY);
-    SelectObject(mem, old);
-    DeleteDC(mem);
-    ReleaseDC(NULL, screen);
-    Bitmap* b = Bitmap::FromHBITMAP(bmp, NULL);
-    DeleteObject(bmp);
-    return b;
-}
-
-static Bitmap* BlurBitmap(Bitmap* src, int factor){
-    int w = src->GetWidth(), h = src->GetHeight();
-    if (w <= 0 || h <= 0) return NULL;
-    int f = factor < 1 ? 1 : factor;
-    if (f == 1) return src->Clone(0, 0, w, h, PixelFormat32bppARGB);
-
-    int sw = std::max(1, w / f), sh = std::max(1, h / f);
-    // pyramid downscale with bicubic: far smoother than one bilinear jump
-    Bitmap* cur = src->Clone(0, 0, w, h, PixelFormat32bppARGB);
-    int cw = w, ch = h;
-    while (cw > sw + 2 || ch > sh + 2){
-        int nw = std::max(sw, cw / 2), nh = std::max(sh, ch / 2);
-        if (nw == cw && nh == ch) break;
-        Bitmap* nxt = new Bitmap(nw, nh, PixelFormat32bppARGB);
-        Graphics gn(nxt);
-        gn.SetInterpolationMode(InterpolationModeHighQualityBicubic);
-        gn.SetPixelOffsetMode(PixelOffsetModeHighQuality);
-        gn.DrawImage(cur, 0, 0, nw, nh);
-        delete cur;
-        cur = nxt; cw = nw; ch = nh;
-    }
-    if (cw != sw || ch != sh){
-        Bitmap* nxt = new Bitmap(sw, sh, PixelFormat32bppARGB);
-        Graphics gn(nxt);
-        gn.SetInterpolationMode(InterpolationModeHighQualityBicubic);
-        gn.SetPixelOffsetMode(PixelOffsetModeHighQuality);
-        gn.DrawImage(cur, 0, 0, sw, sh);
-        delete cur;
-        cur = nxt; cw = sw; ch = sh;
-    }
-
-    Bitmap* out = new Bitmap(w, h, PixelFormat32bppARGB);
-    Graphics go(out);
-    go.SetInterpolationMode(InterpolationModeHighQualityBicubic);
-    go.SetPixelOffsetMode(PixelOffsetModeHighQuality);
-    go.DrawImage(cur, 0, 0, w, h);
-    delete cur;
-    return out;
-}
-
-static float ComputeLuminance(Bitmap* b){
-    int w = b->GetWidth(), h = b->GetHeight();
-    if (w <= 0 || h <= 0) return 0.5f;
-    long sum = 0; int cnt = 0;
-    int step = std::max(1, std::min(w, h) / 24);
-    for (int y = 0; y < h; y += step){
-        for (int x = 0; x < w; x += step){
-            Color c; b->GetPixel(x, y, &c);
-            sum += (c.GetR() * 299 + c.GetG() * 587 + c.GetB() * 114) / 1000;
-            cnt++;
-        }
-    }
-    if (!cnt) return 0.5f;
-    return (sum / (float)cnt) / 255.0f;
-}
-
-// ---------------- background: what is really behind the widget ----------------
-// The widget lives on the desktop, so what lies behind it is the wallpaper (plus
-// desktop icons). Screen-grabbing would only ever reproduce our own window, and
-// PrintWindow on the shell often fails, so we rebuild the wallpaper layer from the
-// file Windows itself uses. Dynamic wallpapers are still picked up when the shell
-// does expose a readable surface.
-static Bitmap* g_wallImage = NULL;      // cached source image
-static std::wstring g_wallPath;         // path it was loaded from
-static ULARGE_INTEGER g_wallStamp = {{0}};
-
-static std::wstring WallpaperPath(){
-    wchar_t buf[1024] = {0};
-    DWORD sz = sizeof(buf);
-    if (RegGetValueW(HKEY_CURRENT_USER, L"Control Panel\\Desktop", L"WallPaper",
-                     RRF_RT_REG_SZ, NULL, buf, &sz) != ERROR_SUCCESS) return L"";
-    std::wstring p = buf;
-    wchar_t ex[MAX_PATH * 2] = {0};
-    if (ExpandEnvironmentStringsW(p.c_str(), ex, MAX_PATH * 2)) p = ex;
-    return p;
-}
-
-static bool WallpaperStamp(const std::wstring& path, ULARGE_INTEGER* out){
-    WIN32_FILE_ATTRIBUTE_DATA fad;
-    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad)) return false;
-    out->LowPart = fad.nFileSizeLow; out->HighPart = fad.nFileSizeHigh;
-    return true;
-}
-
-static void FreeWallpaperCache(){
-    if (g_wallImage){ delete g_wallImage; g_wallImage = NULL; }
-    g_wallPath.clear();
-    g_wallStamp.QuadPart = 0;
-}
-
-// cover / fit / stretch / center, as Windows lays the wallpaper out on the primary monitor
-static int WallpaperStyle(){
-    wchar_t style[16] = {0}, tile[8] = {0};
-    DWORD sz = sizeof(style);
-    RegGetValueW(HKEY_CURRENT_USER, L"Control Panel\\Desktop", L"WallpaperStyle",
-                 RRF_RT_REG_SZ, NULL, style, &sz);
-    sz = sizeof(tile);
-    RegGetValueW(HKEY_CURRENT_USER, L"Control Panel\\Desktop", L"TileWallpaper",
-                 RRF_RT_REG_SZ, NULL, tile, &sz);
-    int s = _wtoi(style);
-    if (_wtoi(tile) == 1 && s == 0) return 1;   // tiled
-    return s;                                    // 10 fill, 6 fit, 2 stretch, 0 center
-}
-
-// render the wallpaper the way the desktop shows it, cropped to the widget rect
-static Bitmap* RenderWallpaperLayer(){
-    std::wstring path = WallpaperPath();
-    if (path.empty()) return NULL;
-    ULARGE_INTEGER stamp = {{0}};
-    if (!WallpaperStamp(path, &stamp)) return NULL;
-
-    if (!g_wallImage || g_wallPath != path || g_wallStamp.QuadPart != stamp.QuadPart){
-        FreeWallpaperCache();
-        g_wallImage = new Bitmap(path.c_str());
-        if (!g_wallImage || g_wallImage->GetLastStatus() != Ok){
-            FreeWallpaperCache();
-            return NULL;
-        }
-        g_wallPath = path;
-        g_wallStamp = stamp;
-    }
-
-    int vx = GetSystemMetrics(SM_XVIRTUALSCREEN), vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
-    int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN), vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-    if (vw <= 0 || vh <= 0) return NULL;
-
-    Bitmap* out = new Bitmap(vw, vh, PixelFormat32bppARGB);
-    Graphics g(out);
-    g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
-    g.SetPixelOffsetMode(PixelOffsetModeHighQuality);
-
-    int mw = GetSystemMetrics(SM_CXSCREEN), mh = GetSystemMetrics(SM_CYSCREEN);
-    if (mw <= 0 || mh <= 0){ mw = vw; mh = vh; }
-    int iw = (int)g_wallImage->GetWidth(), ih = (int)g_wallImage->GetHeight();
-    int style = WallpaperStyle();
-
-    double dw, dh;
-    if (style == 2){ dw = mw; dh = mh; }                       // stretch
-    else if (style == 6){                                       // fit
-        double s = std::min((double)mw / iw, (double)mh / ih);
-        dw = iw * s; dh = ih * s;
-    } else if (style == 0){                                      // center (native size)
-        dw = iw; dh = ih;
-    } else {                                                    // fill / span / fallback
-        double s = std::max((double)mw / iw, (double)mh / ih);
-        dw = iw * s; dh = ih * s;
-    }
-    double ox = -vx + (mw - dw) / 2.0, oy = -vy + (mh - dh) / 2.0;
-    RectF dst((REAL)ox, (REAL)oy, (REAL)dw, (REAL)dh);
-    g.DrawImage(g_wallImage, dst);
-
-    // secondary monitors: keep extending the same picture so nothing is left black
-    if (vw > mw || vh > mh){
-        g.DrawImage(g_wallImage, RectF((REAL)(ox + dw), (REAL)oy, (REAL)dw, (REAL)dh));
-    }
-    return out;
-}
-
-static void HideOwnWindows(BOOL* mainVis, BOOL* setVis){
-    *mainVis = (g_hwnd && IsWindowVisible(g_hwnd));
-    *setVis  = (g_setHwnd && IsWindowVisible(g_setHwnd));
-    if (*mainVis) ShowWindow(g_hwnd, SW_HIDE);
-    if (*setVis)  ShowWindow(g_setHwnd, SW_HIDE);
-    DwmFlush();
-}
-static void RestoreOwnWindows(BOOL mainVis, BOOL setVis){
-    if (mainVis && g_hwnd) ShowWindow(g_hwnd, SW_SHOWNA);
-    if (setVis && g_setHwnd) ShowWindow(g_setHwnd, SW_SHOWNA);
-    DwmFlush();
-}
-
-static int  g_bgSource = 0;              // 0 none, 2 wallpaper file, 3 screen grab
-
-// refresh the cached backdrop; returns true when the image actually changed.
-// We render the wallpaper *file* directly (correct on Win10/11 where PrintWindow can't
-// see the DWM-composited wallpaper and would otherwise capture our own widget into the
-// snapshot — the source of the "darkens frame by frame" bug). Rebuild only when the
-// picture or the monitor layout changed, so a static wallpaper is rendered once.
-static bool RefreshDesktopSnapshot(bool force = false){
-    if (!g_hwnd) return false;
-
-    ULARGE_INTEGER stamp = {{0}};
-    std::wstring path = WallpaperPath();
-    bool sameWall = (g_bgSource == 2 && path == g_wallPath &&
-                     WallpaperStamp(path, &stamp) && stamp.QuadPart == g_wallStamp.QuadPart);
-    if (sameWall && !force) return false;
-
-    Bitmap* wall = RenderWallpaperLayer();
-    if (wall){
-        delete g_screenShot; g_screenShot = wall;
-        g_bgSource = 2;
-        g_vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
-        g_vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
-        g_vw = wall->GetWidth(); g_vh = wall->GetHeight();
-        return true;
-    }
-
-    // fallback: briefly hide ourselves and grab the screen (only when forced)
-    if (force){
-        RECT wr; GetWindowRect(g_hwnd, &wr);
-        int w = wr.right - wr.left, h = wr.bottom - wr.top;
-        BOOL mv, sv; HideOwnWindows(&mv, &sv);
-        Bitmap* grab = CaptureRegion(wr.left, wr.top, w, h);
-        RestoreOwnWindows(mv, sv);
-        if (grab){
-            delete g_screenShot; g_screenShot = grab;
-            g_bgSource = 3;
-            g_vx = wr.left; g_vy = wr.top;
-            g_vw = w; g_vh = h;
-            return true;
-        }
-    }
-    return false;
-}
-
-// is the widget actually visible on the desktop, or covered by some app?
-static bool WidgetObscured(){
-    if (!g_hwnd || !IsWindowVisible(g_hwnd)) return true;
-    if (IsIconic(g_hwnd)) return true;
-    RECT wr; GetWindowRect(g_hwnd, &wr);
-    POINT pts[3];
-    pts[0] = {wr.left + 8, wr.top + 8};
-    pts[1] = {(wr.left + wr.right) / 2, (wr.top + wr.bottom) / 2};
-    pts[2] = {wr.right - 8, wr.bottom - 8};
-    for (int i = 0; i < 3; i++){
-        HWND h = WindowFromPoint(pts[i]);
-        if (!h || h == g_hwnd) continue;
-        wchar_t cls[64] = {0};
-        GetClassNameW(h, cls, 64);
-        if (lstrcmpW(cls, L"Progman") == 0 || lstrcmpW(cls, L"WorkerW") == 0 ||
-            lstrcmpW(cls, L"SysListView32") == 0 || lstrcmpW(cls, L"SHELLDLL_DefView") == 0)
-            continue;                       // desktop itself, not an app
-        return true;
-    }
-    return false;
-}
-
-// a downscaled copy of the cached backdrop, kept so live drag can re-crop from a
-// small source instead of the full-resolution snapshot every frame. This is what
-// makes the background track the pointer smoothly instead of stuttering.
-static Bitmap* g_screenShotSmall = NULL;
-static int g_ssSmallScale = 0;
-static Bitmap* g_ssSmallSrc = NULL;   // which snapshot the small copy was built from
-
-static Bitmap* CropDesktop(int wx, int wy, int w, int h, bool fast = false){
-    if (!g_screenShot || w <= 0 || h <= 0) return NULL;
-
-    Bitmap* src = g_screenShot;
-    int sx = g_vx, sy = g_vy, sw = w, sh = h;
-    int x0 = wx - g_vx, y0 = wy - g_vy;
-
-    if (fast){
-        // build (once) a small copy of the full snapshot so re-cropping is cheap
-        int imgW = g_screenShot->GetWidth(), imgH = g_screenShot->GetHeight();
-        int scale = std::max(1, std::min(imgW, imgH) / 512);
-        if (!g_screenShotSmall || g_ssSmallScale != scale || g_ssSmallSrc != g_screenShot){
-            if (g_screenShotSmall) delete g_screenShotSmall;
-            g_screenShotSmall = new Bitmap(std::max(1, imgW / scale), std::max(1, imgH / scale), PixelFormat32bppARGB);
-            Graphics gs(g_screenShotSmall);
-            gs.SetInterpolationMode(InterpolationModeHighQualityBicubic);
-            gs.DrawImage(g_screenShot, 0, 0, g_screenShotSmall->GetWidth(), g_screenShotSmall->GetHeight());
-            g_ssSmallScale = scale;
-            g_ssSmallSrc = g_screenShot;
-        }
-        src = g_screenShotSmall;
-        sx = g_vx / scale; sy = g_vy / scale;
-        x0 = (wx - g_vx) / scale; y0 = (wy - g_vy) / scale;
-        sw = w / scale; sh = h / scale;
-    }
-
-    int imgW = src->GetWidth(), imgH = src->GetHeight();
-    if (x0 < 0){ sw += x0; x0 = 0; }
-    if (y0 < 0){ sh += y0; y0 = 0; }
-    if (x0 + sw > imgW) sw = imgW - x0;
-    if (y0 + sh > imgH) sh = imgH - y0;
-    if (sw <= 0 || sh <= 0) return NULL;
-
-    Bitmap* out = new Bitmap(w, h, PixelFormat32bppARGB);
-    Graphics g(out);
-    // fast path uses bilinear (cheap); full path keeps high quality
-    g.SetInterpolationMode(fast ? InterpolationModeBilinear : InterpolationModeHighQualityBilinear);
-    g.SetPixelOffsetMode(fast ? PixelOffsetModeHalf : PixelOffsetModeHighQuality);
-    g.DrawImage(src, RectF(0, 0, (REAL)w, (REAL)h), x0, y0, sw, sh, UnitPixel);
-    return out;
-}
-
-// build a blurred + tinted image of the requested size from a raw crop.
-// `maxFactor` clamps the blur pyramid depth; live drag uses a small value so the
-// backdrop tracks the pointer in real time (the wallpaper is already cached, so
-// re-cropping is just a cheap in-memory resize).
-// `fast` skips the saturation pass and the legibility veil entirely and reuses the
-// last known luminance, so a live drag only pays for crop + shallow blur + tint.
-static Bitmap* MakeBg(Bitmap* raw, int w, int h, float* lumOut, int maxFactor = 24, bool fast = false){
-    if (!raw || w <= 0 || h <= 0) return NULL;
-    int factor = 1;                 // blur slider removed — backdrop is no longer blurred
-    if (factor > maxFactor) factor = maxFactor;
-    Bitmap* blurred = BlurBitmap(raw, factor);
-    float lum = (fast && lumOut && *lumOut >= 0.0f) ? *lumOut : ComputeLuminance(blurred);
-    if (lumOut) *lumOut = lum;
-
-    Bitmap* out = new Bitmap(w, h, PixelFormat32bppARGB);
-    Graphics g(out);
-    if (fast){
-        g.SetInterpolationMode(InterpolationModeBilinear);
-        g.SetPixelOffsetMode(PixelOffsetModeHalf);
-        g.DrawImage(blurred, 0, 0, w, h);
-    } else {
-        g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
-        g.SetPixelOffsetMode(PixelOffsetModeHighQuality);
-        // draw the blurred wallpaper as-is: no saturation lift, so a neutral grey
-        // accent stays perfectly neutral and the glass shows the true wallpaper colour
-        g.DrawImage(blurred, 0, 0, w, h);
-    }
-    delete blurred;
-
-    // The opacity slider is now a direct, linear glass-opacity control: 0 = the
-    // wallpaper shows through untouched (pure see-through), 100 = a fully solid
-    // panel of the accent colour. No gamma curve, no hidden clamp — what you set is
-    // exactly what you get. This is what finally makes "transparent" mean transparent
-    // and removes the faint blue/grey cast users kept seeing.
-    float o = cfg.opacity / 100.0f;
-    int a = (int)(o * 255.0f + 0.5f);
-    if (a < 0) a = 0;
-    if (a > 255) a = 255;
-    if (a > 0){
-        SolidBrush br(Color((BYTE)a, GetRValue(cfg.accent), GetGValue(cfg.accent), GetBValue(cfg.accent)));
-        g.FillRectangle(&br, 0, 0, w, h);
-    }
-
-    if (!fast){
-        // a very light veil keeps text legible on busy wallpapers without killing the glass
-        float accL = ColorLum(cfg.accent);
-        float w2 = o; if (w2 > 1.0f) w2 = 1.0f;
-        float eff = accL * w2 + lum * (1.0f - w2);
-        bool lightText = (eff <= 0.58f);
-        BYTE va = (BYTE)(lightText ? 9 : 7);
-        SolidBrush veil(lightText ? Color(va, 0, 0, 0) : Color(va, 255, 255, 255));
-        g.FillRectangle(&veil, 0, 0, w, h);
-    }
-    return out;
-}
-
-static void RebuildMainBg(){
-    if (!g_hwnd) return;
-    RECT rc; GetClientRect(g_hwnd, &rc);
-    RECT wr; GetWindowRect(g_hwnd, &wr);
-    Bitmap* raw = CropDesktop(wr.left, wr.top, rc.right, rc.bottom);
-    Bitmap* old = g_bg;
-    g_bg = MakeBg(raw, rc.right, rc.bottom, &g_desktopLum);
-    if (old) delete old;
-    if (raw) delete raw;
-}
-
-// same as RebuildMainBg but with a shallower blur so it keeps up with live drag.
-// Called every WM_MOUSEMOVE while dragging: the wallpaper snapshot is already
-// cached in g_screenShot, so this is only a crop + light blur + tint, no screen
-// capture, no file IO — it tracks the pointer like a real pane of glass.
-static void RebuildMainBgLive(){
-    if (!g_hwnd) return;
-    RECT rc; GetClientRect(g_hwnd, &rc);
-    RECT wr; GetWindowRect(g_hwnd, &wr);
-    // fast crop from a downscaled snapshot + shallow blur + skip saturation/veil
-    Bitmap* raw = CropDesktop(wr.left, wr.top, rc.right, rc.bottom, true);
-    Bitmap* old = g_bg;
-    g_bg = MakeBg(raw, rc.right, rc.bottom, &g_desktopLum, 3, true);
-    if (old) delete old;
-    if (raw) delete raw;
-}
 
 static void Repaint();   // forward decl: re-submit the layered surface (defined below)
 
@@ -939,17 +637,19 @@ static void FreeIcons(){
 }
 
 // ---------------- layout ----------------
-static int TitleH(){ return S(36); }
-static int RowH(){ return S(28); }
+static int TitleH(){ return S(30); }
+static int RowH(){ return S(26); }
+// breathing room between the header hairline and the first list row
+static int ListTop(){ return TitleH() + S(5); }
 static int LeftPad(){ return S(12); }
 static int Indent(){ return S(16); }
 
 static void GetButtons(int w, RECT out[3]){
-    int s = S(22), gap = S(4), rm = S(8);
-    int x = w - rm - s;                       // settings
-    out[1] = {x, S(7), x + s, S(7) + s};
-    x -= (s + gap);                           // refresh
-    out[0] = {x, S(7), x + s, S(7) + s};
+    int s = S(22), rm = S(8);
+    int y = (TitleH() - s) / 2;               // same centre line as the folder name
+    int x = w - rm - s;                       // settings (only header action left)
+    out[1] = {x, y, x + s, y + s};
+    out[0] = {0, 0, 0, 0};                    // refresh removed: live watcher replaces it
     out[2] = {0, 0, 0, 0};                    // no close: a desktop gadget must not vanish on a stray click
 }
 
@@ -1093,7 +793,7 @@ static int g_hoverBtn = -1;
 
 static void ClampScroll(int w, int h){
     int total = (int)g_rows.size() * RowH();
-    int vis = h - TitleH();
+    int vis = h - ListTop();
     int maxS = total - vis;
     if (maxS < 0) maxS = 0;
     if (g_scroll > maxS) g_scroll = maxS;
@@ -1114,34 +814,13 @@ static void DrawTitle(Graphics& g, int w){
     DrawTextCrisp(g, L"\uE8B7", g_fontGlyphSmall, fr, &fs, &fb);
 
     // folder name
-    RectF r((REAL)(LeftPad() + S(20)), 0, (REAL)(w - S(140)), (REAL)th);
+    RectF r((REAL)(LeftPad() + S(20)), 0, (REAL)(w - S(52) - (LeftPad() + S(20))), (REAL)th);
     StringFormat sf;
     sf.SetTrimming(StringTrimmingEllipsisCharacter);
     sf.SetFormatFlags(StringFormatFlagsNoWrap);
     sf.SetLineAlignment(StringAlignmentCenter);
     std::wstring title = g_root ? g_root->name : L"";
     DrawStringShadow(g, title, g_fontBold, r, &sf, tc);
-
-    // item-count chip right after the name (gives the header a real product feel)
-    if (!g_rows.empty()){
-        int tw = (int)MeasureTextWidth(g, title, g_fontBold, (int)r.Width);
-        int cx = r.X + tw + S(8);
-        if (cx + S(44) < w - S(120)){
-            RECT chip = {cx, S(10), cx + S(40), S(10) + S(17)};
-            RectF cr((REAL)chip.left, (REAL)chip.top, (REAL)(chip.right - chip.left), (REAL)(chip.bottom - chip.top));
-            GraphicsPath cp;
-            RoundedRect(cp, cr, (REAL)S(8));
-            SolidBrush cb(Color(30, 255, 255, 255));
-            g.FillPath(&cb, &cp);
-            wchar_t cnt[24];
-            wsprintfW(cnt, L"%d 项", (int)g_rows.size());
-            StringFormat cf;
-            cf.SetAlignment(StringAlignmentCenter);
-            cf.SetLineAlignment(StringAlignmentCenter);
-            SolidBrush ctb(Color(190, tc.GetR(), tc.GetG(), tc.GetB()));
-            DrawTextCrisp(g, cnt, g_fontSmall, cr, &cf, &ctb);
-        }
-    }
 
     // hairline divider under the header: accent-tinted, fading out at both ends
     {
@@ -1160,11 +839,11 @@ static void DrawTitle(Graphics& g, int w){
 
     RECT btns[3];
     GetButtons(w, btns);
-    const wchar_t* glyphs[2] = { L"\uE72C", L"\uE713" }; // refresh, settings
-    for (int i = 0; i < 2; i++){
-        RECT b = btns[i];
+    // single header action: settings (refresh is live now, button removed)
+    {
+        RECT b = btns[1];
         RectF br((REAL)b.left, (REAL)b.top, (REAL)(b.right - b.left), (REAL)(b.bottom - b.top));
-        if (g_hoverBtn == i){
+        if (g_hoverBtn == 1){
             GraphicsPath hp; RoundedRect(hp, RectF(br.X - 2, br.Y - 2, br.Width + 4, br.Height + 4), (REAL)S(7));
             Color ac = AccentHi();
             SolidBrush hb(Color(58, ac.GetR(), ac.GetG(), ac.GetB()));
@@ -1175,17 +854,14 @@ static void DrawTitle(Graphics& g, int w){
         StringFormat csf;
         csf.SetAlignment(StringAlignmentCenter);
         csf.SetLineAlignment(StringAlignmentCenter);
-        Color ic = tc;
-        if (i == 0 && g_hoverBtn == 0) ic = AccentHi();
-        else if (i == 1 && g_hoverBtn == 1) ic = AccentHi();
-        if (i == 2 && g_hoverBtn == 2) ic = Color(255, 255, 140, 140);
+        Color ic = (g_hoverBtn == 1) ? AccentHi() : tc;
         SolidBrush tb(ic);
-        DrawTextCrisp(g, glyphs[i], g_fontGlyph, br, &csf, &tb);
+        DrawTextCrisp(g, L"\uE713", g_fontGlyph, br, &csf, &tb);
     }
 }
 
 static void DrawList(Graphics& g, int w, int h){
-    int th = TitleH();
+    int th = ListTop();
     int rh = RowH();
     Color tc = TextColor();
 
@@ -1268,7 +944,7 @@ static void DrawList(Graphics& g, int w, int h){
 }
 
 static void DrawScrollbar(Graphics& g, int w, int h){
-    int th = TitleH();
+    int th = ListTop();
     int vis = h - th;
     int total = (int)g_rows.size() * RowH();
     if (total <= vis) return;
@@ -1297,6 +973,26 @@ static void DrawScrollbar(Graphics& g, int w, int h){
 static void DrawFrame(Graphics& g, int w, int h){
     float radius = S(12);
 
+    // glass body light: a soft top sheen plus a faint bottom ambient shade, both
+    // clipped to the rounded silhouette so the light follows the corners instead
+    // of ending in a square edge. Fixed pixel heights (not fractions of h) so no
+    // hard alpha band appears when the widget is resized.
+    {
+        GraphicsPath clip;
+        RoundedRect(clip, RectF(1.0f, 1.0f, (REAL)(w - 2), (REAL)(h - 2)), radius - 1.0f);
+        GraphicsState st = g.Save();
+        g.SetClip(&clip);
+        RectF sh(0.0f, 0.0f, (REAL)w, (REAL)S(56));
+        LinearGradientBrush ls(sh, Color(26, 255, 255, 255), Color(0, 255, 255, 255),
+                               LinearGradientModeVertical);
+        g.FillRectangle(&ls, sh);
+        RectF bs(0.0f, (REAL)(h - S(64)), (REAL)w, (REAL)S(64));
+        LinearGradientBrush lb(bs, Color(0, 0, 0, 0), Color(20, 0, 0, 0),
+                               LinearGradientModeVertical);
+        g.FillRectangle(&lb, bs);
+        g.Restore(st);
+    }
+
     // border: even, subtle all the way around — no top-to-bottom brightness gradient and
     // no height-proportional sheen/specular bands. Those bands were the source of the
     // faint horizontal colour-difference line that grew more visible the taller the
@@ -1304,15 +1000,25 @@ static void DrawFrame(Graphics& g, int w, int h){
     RectF r((REAL)0.5f, (REAL)0.5f, (REAL)(w - 1), (REAL)(h - 1));
     GraphicsPath p;
     RoundedRect(p, r, radius);
-    Pen pen(Color(70, 255, 255, 255), 1.0f);
+    Pen pen(Color(100, 255, 255, 255), 1.0f);
     g.DrawPath(&pen, &p);
 
     // a second, fainter inner ring adds a beveled edge so the slab reads as thick glass
     RectF r2((REAL)1.5f, (REAL)1.5f, (REAL)(w - 3), (REAL)(h - 3));
     GraphicsPath p2;
     RoundedRect(p2, r2, radius - 1.0f);
-    Pen pen2(Color(22, 255, 255, 255), 1.0f);
+    Pen pen2(Color(26, 255, 255, 255), 1.0f);
     g.DrawPath(&pen2, &p2);
+
+    // edge catch-light: a 1px glint along the inside top edge and a matching shade
+    // along the inside bottom edge — the cue that reads as polished glass thickness.
+    {
+        REAL x0 = radius, x1 = (REAL)w - radius;
+        Pen glint(Color(64, 255, 255, 255), 1.0f);
+        g.DrawLine(&glint, x0, 1.5f, x1, 1.5f);
+        Pen shade(Color(46, 0, 0, 0), 1.0f);
+        g.DrawLine(&shade, x0, (REAL)h - 1.5f, x1, (REAL)h - 1.5f);
+    }
 }
 
 // ---------------- frost overlay (removed) ----------------
@@ -1385,12 +1091,110 @@ static void Toggle(Item* it){
     Repaint();
 }
 
+static void StartWatch();   // live-refresh watcher, defined below
+
 static void Reload(){
     LoadRoot();
     RECT r; GetClientRect(g_hwnd, &r);
     g_scroll = 0;
     ClampScroll(r.right, r.bottom);
     Repaint();
+    StartWatch();
+}
+
+// ---------------- live refresh (directory watcher) ----------------
+// The manual refresh button is gone: a ReadDirectoryChangesW watch on the root
+// (recursive) posts WM_LIVE whenever anything under the folder changes. A 120 ms
+// debounce timer coalesces bursts (a save writes several notifications) into one
+// rebuild, and the rebuild preserves expanded folders + scroll position so the
+// list never jumps under the user's cursor.
+#define WM_LIVE     (WM_APP + 97)
+#define WM_SNAP     (WM_APP + 96)   // debug/docs: dump the true-alpha surface to a PNG
+#define TIMER_LIVE  4
+
+static HANDLE g_watchDir = INVALID_HANDLE_VALUE;
+static HANDLE g_watchThread = NULL;
+static HANDLE g_watchEvt = NULL;
+static HANDLE g_watchStop = NULL;
+static OVERLAPPED g_watchOv = {0};
+static DWORD g_watchBuf[2048];   // DWORD array => DWORD-aligned, as ReadDirectoryChangesW requires
+static wchar_t g_watchPath[MAX_PATH] = L"";
+static volatile LONG g_livePending = 0;
+
+static void CollectExpanded(Item* d, std::vector<std::wstring>& out){
+    if (!d || !d->isDir) return;
+    if (d->expanded && d != g_root) out.push_back(d->path);
+    for (auto c : d->children) CollectExpanded(c, out);
+}
+static void RestoreExpanded(Item* d, const std::vector<std::wstring>& ex){
+    if (!d || !d->isDir) return;
+    for (const auto& p : ex){
+        if (p == d->path){ d->expanded = true; LoadChildren(d); break; }
+    }
+    for (auto c : d->children) RestoreExpanded(c, ex);
+}
+static void LiveReload(){
+    std::vector<std::wstring> ex;
+    CollectExpanded(g_root, ex);
+    int keepScroll = g_scroll;
+    LoadRoot();
+    RestoreExpanded(g_root, ex);
+    RebuildRows();
+    RECT r; GetClientRect(g_hwnd, &r);
+    g_scroll = keepScroll;
+    ClampScroll(r.right, r.bottom);
+    Repaint();
+}
+
+static DWORD WINAPI WatchThread(LPVOID){
+    for (;;){
+        DWORD bytes = 0;
+        ResetEvent(g_watchEvt);
+        if (!ReadDirectoryChangesW(g_watchDir, (BYTE*)g_watchBuf, sizeof g_watchBuf, TRUE,
+                                   FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME |
+                                   FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_SIZE,
+                                   &bytes, &g_watchOv, NULL)){
+            break;
+        }
+        HANDLE hs[2] = { g_watchEvt, g_watchStop };
+        DWORD wr = WaitForMultipleObjects(2, hs, FALSE, INFINITE);
+        if (wr != WAIT_OBJECT_0) break;          // stop signalled
+        if (InterlockedCompareExchange(&g_livePending, 1, 0) == 0)
+            PostMessageW(g_hwnd, WM_LIVE, 0, 0);
+    }
+    return 0;
+}
+
+static void StopWatch(){
+    if (g_watchThread){
+        if (g_watchStop) SetEvent(g_watchStop);
+        if (g_watchDir != INVALID_HANDLE_VALUE) CancelIoEx(g_watchDir, &g_watchOv);
+        WaitForSingleObject(g_watchThread, 800);
+        CloseHandle(g_watchThread); g_watchThread = NULL;
+    }
+    if (g_watchDir != INVALID_HANDLE_VALUE){ CloseHandle(g_watchDir); g_watchDir = INVALID_HANDLE_VALUE; }
+    if (g_watchEvt){ CloseHandle(g_watchEvt); g_watchEvt = NULL; }
+    if (g_watchStop){ CloseHandle(g_watchStop); g_watchStop = NULL; }
+    g_watchPath[0] = 0;
+}
+
+static void StartWatch(){
+    std::wstring f = cfg.folder;
+    while (f.size() > 1 && f.back() == L'\\') f.pop_back();
+    if (g_watchThread && lstrcmpiW(g_watchPath, f.c_str()) == 0) return;  // already watching it
+    StopWatch();
+    lstrcpynW(g_watchPath, f.c_str(), MAX_PATH);
+    g_watchDir = CreateFileW(f.c_str(), FILE_LIST_DIRECTORY,
+                             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                             NULL, OPEN_EXISTING,
+                             FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED, NULL);
+    if (g_watchDir == INVALID_HANDLE_VALUE) return;
+    g_watchEvt = CreateEventW(NULL, TRUE, FALSE, NULL);
+    g_watchStop = CreateEventW(NULL, TRUE, FALSE, NULL);
+    ZeroMemory(&g_watchOv, sizeof g_watchOv);
+    g_watchOv.hEvent = g_watchEvt;
+    g_watchThread = CreateThread(NULL, 0, WatchThread, NULL, 0, NULL);
+    if (!g_watchThread) StopWatch();
 }
 
 // ---------------- desktop hosting ----------------
@@ -1408,43 +1212,149 @@ static void Reload(){
 // symptom. We only fall back to HWND_BOTTOM when no WorkerW is present (rare).
 
 // find the shell wallpaper window that hosts the desktop picture
-static HWND GetDesktopWorkerW(){
-    // On Win10/11 the desktop icons (SHELLDLL_DefView -> SysListView32) are children
-    // of the top-level Progman window, and the wallpaper is drawn by a WorkerW child
-    // of Progman. Parking our window immediately AFTER Progman in the z-order puts it
-    // above the wallpaper (and the icons, which are Progman's children) but below every
-    // ordinary app window — exactly where a desktop gadget belongs.
-    HWND progman = FindWindowW(L"Progman", NULL);
-    if (progman) return progman;
+// ---------------- P7: desktop host identification ----------------
+struct DesktopHostInfo {
+    HWND  hwnd = NULL;
+    HWND  anchor = NULL;              // z-order anchor: highest WorkerW above the host,
+                                      // else the host itself (wallpaper-band top)
+    HWND  anchorAbove = NULL;         // window immediately above the anchor in the
+                                      // enumeration order (lowest ordinary window)
+    bool  valid = false;
+    bool  isLegacyDesktop = false;   // hosts SHELLDLL_DefView (classic icon layer)
+    bool  isProgman = false;         // titled "Program Manager" (modern shell)
+    DWORD processId = 0;
+};
 
-    // fallback for shell restarts where Progman is temporarily gone: try a WorkerW that
-    // hosts a DefView, else any top-level WorkerW.
-    HWND w = NULL;
-    while ((w = FindWindowExW(NULL, w, L"WorkerW", NULL)) != NULL){
-        if (FindWindowExW(w, NULL, L"SHELLDLL_DefView", NULL)) return w;
+static DesktopHostInfo g_lastHost;
+
+struct HostScanCtx {
+    DesktopHostInfo legacy;
+    DesktopHostInfo progman;
+    HWND topWorkerW = NULL;          // FIRST WorkerW seen = highest in z-order
+    HWND beforeTopWorkerW = NULL;    // window seen immediately before the first WorkerW
+    HWND lastSeen = NULL;
+};
+
+static BOOL CALLBACK HostScanProc(HWND h, LPARAM lp){
+    HostScanCtx* ctx = (HostScanCtx*)lp;
+    if (!ctx->legacy.valid && FindWindowExW(h, NULL, L"SHELLDLL_DefView", NULL)){
+        DesktopHostInfo info;
+        info.hwnd = h; info.valid = true; info.isLegacyDesktop = true;
+        GetWindowThreadProcessId(h, &info.processId);
+        ctx->legacy = info;
     }
-    HWND any = FindWindowW(L"WorkerW", NULL);
-    if (any) return any;
-    return NULL;
+    if (!ctx->progman.valid){
+        wchar_t title[64] = {0};
+        if (GetWindowTextW(h, title, 64) && wcscmp(title, L"Program Manager") == 0){
+            DesktopHostInfo info;
+            info.hwnd = h; info.valid = true; info.isProgman = true;
+            GetWindowThreadProcessId(h, &info.processId);
+            ctx->progman = info;
+        }
+    }
+    // EnumWindows visits top-level windows top-to-bottom in z-order, so the first
+    // WorkerW we meet is the highest one — the top of the wallpaper band — and the
+    // window seen right before it is the lowest ordinary window.
+    if (!ctx->topWorkerW){
+        wchar_t cls[64] = {0};
+        if (GetClassNameW(h, cls, 64) && wcscmp(cls, L"WorkerW") == 0){
+            ctx->topWorkerW = h;
+            ctx->beforeTopWorkerW = ctx->lastSeen;
+        }
+    }
+    ctx->lastSeen = h;
+    return TRUE;
 }
 
-static void SitOnDesktop(){
-    if (!g_hwnd) return;
+// Three-tier lookup with NO arbitrary-WorkerW fallback:
+//   1) top-level window that hosts SHELLDLL_DefView (legacy desktop)
+//   2) top-level window titled "Program Manager" (modern shell)
+//   3) explicit failure (valid = false)
+//
+// The z-order anchor is the top of the wallpaper band: the highest WorkerW. On 26H2
+// shells the desktop band is fragmented (Progman sits far below, WorkerW leftovers
+// scattered above it), so anchoring on the host's immediate neighbour can park the
+// widget ABOVE ordinary app windows. Anchoring under the window right above the
+// highest WorkerW pins it below every app and above the wallpaper, regardless of
+// band fragmentation.
+static DesktopHostInfo ProbeDesktopHost(){
+    HostScanCtx ctx;
+    EnumWindows(HostScanProc, (LPARAM)&ctx);
+    DesktopHostInfo result = ctx.legacy.valid ? ctx.legacy
+                            : (ctx.progman.valid ? ctx.progman : DesktopHostInfo());
+    if (result.valid){
+        result.anchor = ctx.topWorkerW ? ctx.topWorkerW : result.hwnd;
+        result.anchorAbove = ctx.beforeTopWorkerW;
+    }
+    bool changed = (result.hwnd != g_lastHost.hwnd) ||
+                   (result.anchor != g_lastHost.anchor) ||
+                   (result.anchorAbove != g_lastHost.anchorAbove) ||
+                   (result.isLegacyDesktop != g_lastHost.isLegacyDesktop) ||
+                   (result.isProgman != g_lastHost.isProgman);
+    if (changed){
+        wchar_t cls[64] = {0}, title[64] = {0}, acls[64] = {0};
+        RECT r = {0}; int vis = 0;
+        if (result.hwnd){
+            GetClassNameW(result.hwnd, cls, 64);
+            GetWindowTextW(result.hwnd, title, 64);
+            GetWindowRect(result.hwnd, &r);
+            vis = IsWindowVisible(result.hwnd) ? 1 : 0;
+        }
+        if (result.anchor) GetClassNameW(result.anchor, acls, 64);
+        DiagLog(L"host=%ls hwnd=0x%X anchor=0x%X(%ls) above=0x%X pid=%lu cls=%ls title=%ls vis=%d rect=(%d,%d,%d,%d) legacy=%d progman=%d",
+                result.valid ? L"OK" : L"MISSING", (unsigned)(UINT_PTR)result.hwnd,
+                (unsigned)(UINT_PTR)result.anchor, acls,
+                (unsigned)(UINT_PTR)result.anchorAbove,
+                (unsigned long)result.processId, cls, title, vis,
+                r.left, r.top, r.right, r.bottom,
+                result.isLegacyDesktop ? 1 : 0, result.isProgman ? 1 : 0);
+        g_lastHost = result;
+    }
+    return result;
+}
+
+// (P7 note: no GetDesktopWorkerW fallback remains — any code that needs the host
+// must go through ProbeDesktopHost(), which never returns an arbitrary WorkerW.)
+
+enum class DesktopPlacementResult { Success, HostUnavailable, WindowInvalid, PlacementFailed };
+
+// Anchor the widget into the desktop band. When the desktop host cannot be confirmed,
+// do NOT touch the z-order and do NOT hide the window — keep the current safe state,
+// report the failure, and let the guard retry later.
+static DesktopPlacementResult SitOnDesktop(){
+    if (!g_hwnd || !IsWindow(g_hwnd)){
+        DiagLog(L"SitOnDesktop: window invalid");
+        return DesktopPlacementResult::WindowInvalid;
+    }
     // keep it a plain top-level tool window that never takes focus
     LONG_PTR ex = GetWindowLongPtrW(g_hwnd, GWL_EXSTYLE);
     ex &= ~WS_EX_TOPMOST;
     ex |= WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
     SetWindowLongPtrW(g_hwnd, GWL_EXSTYLE, ex);
 
-    // IMPORTANT: SetWindowPos(hwnd, hInsertAfter) places our window *below* hInsertAfter
-    // in the z-order (hInsertAfter is the "insert after = go under" anchor). To park the
-    // widget ABOVE the wallpaper host we must target the window that sits immediately
-    // ABOVE the host, not the host itself. GW_HWNDPREV gives us that window.
-    HWND host = GetDesktopWorkerW();   // Progman (or a WorkerW) = the wallpaper layer
-    HWND insertAfter = HWND_BOTTOM;
-    if (host){
-        insertAfter = GetWindow(host, GW_HWNDPREV);   // window just above the wallpaper
-        if (!insertAfter) insertAfter = HWND_TOP;      // host is already topmost in its band
+    DesktopHostInfo host = ProbeDesktopHost();
+    if (!host.valid){
+        DiagLog(L"SitOnDesktop: host unavailable, keeping current position");
+        return DesktopPlacementResult::HostUnavailable;
+    }
+
+    // Park the widget directly above the desktop host (Progman), which sits at the
+    // very bottom of the z-order. That makes the widget behave like the desktop
+    // icons themselves: above the wallpaper, below EVERY window, never covering an
+    // app. The WorkerW anchor/above fields remain recorded for diagnostics; on 26H2
+    // the WorkerW band is fragmented and unreliable as an insertion point.
+    HWND insertAfter = GetWindow(host.hwnd, GW_HWNDPREV);
+    if (!insertAfter || !IsWindow(insertAfter)) insertAfter = host.anchorAbove;
+    if (!insertAfter || !IsWindow(insertAfter)) insertAfter = GetWindow(host.anchor, GW_HWNDPREV);
+    if (!insertAfter || insertAfter == g_hwnd){
+        // The widget itself is the host's upper neighbour (it was parked here
+        // before being hidden), or the chain is empty. Fall back to our own upper
+        // neighbour so a hidden widget can still be restored.
+        insertAfter = GetWindow(g_hwnd, GW_HWNDPREV);
+    }
+    if (!insertAfter || insertAfter == g_hwnd){
+        DiagLog(L"SitOnDesktop: no window above host, keeping current position");
+        return DesktopPlacementResult::PlacementFailed;
     }
 
     // SWP_SHOWWINDOW makes this a show+position in one atomic call, so a window that
@@ -1452,6 +1362,7 @@ static void SitOnDesktop(){
     // avoiding the "sometimes it appears, sometimes it doesn't" race.
     SetWindowPos(g_hwnd, insertAfter, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    return DesktopPlacementResult::Success;
 }
 
 // temporarily allow activation so a popup menu can take focus (needed for click-away)
@@ -1771,7 +1682,80 @@ static const COLORREF g_presets[6] = {
 
 // logical layout (multiplied by DPI scale through S())
 static const int SET_W = 400;
-static const int SET_H = 548;
+static const int SET_H = 504;
+
+// ---------------- documentation snapshots (true alpha) ----------------
+// PrintWindow on a per-pixel-alpha layered window returns an opaque composite, so
+// screen grabs cannot show the see-through glass. These helpers re-render the very
+// same PARGB surface the widget submits to DWM, un-premultiply it, and save a PNG
+// with a real alpha channel — the honest source for README screenshots.
+static CLSID SnapPngClsid(){
+    UINT len = 0, bytes = 0; GetImageEncodersSize(&len, &bytes);
+    if (!len) return CLSID();
+    ImageCodecInfo* ic = (ImageCodecInfo*)malloc(bytes);
+    CLSID id = CLSID();
+    if (GetImageEncoders(len, bytes, ic) == Ok){
+        for (UINT i = 0; i < len; i++)
+            if (!wcscmp(ic[i].MimeType, L"image/png")){ id = ic[i].Clsid; break; }
+    }
+    free(ic);
+    return id;
+}
+static bool SaveSnapPng(Bitmap* bmp, const wchar_t* path){
+    if (!bmp) return false;
+    int w = (int)bmp->GetWidth(), h = (int)bmp->GetHeight();
+    BitmapData bd; Rect rc(0, 0, w, h);
+    if (bmp->LockBits(&rc, (ImageLockMode)3, PixelFormat32bppPARGB, &bd) != Ok) return false;
+    Bitmap out(w, h, PixelFormat32bppARGB);
+    BitmapData od; Rect orc(0, 0, w, h);
+    if (out.LockBits(&orc, (ImageLockMode)3, PixelFormat32bppARGB, &od) != Ok){
+        bmp->UnlockBits(&bd); return false;
+    }
+    for (int y = 0; y < h; y++){
+        const BYTE* s = (const BYTE*)bd.Scan0 + (size_t)y * bd.Stride;
+        BYTE* d = (BYTE*)od.Scan0 + (size_t)y * od.Stride;
+        for (int x = 0; x < w; x++){
+            BYTE a = s[x*4+3];
+            if (!a){ d[x*4] = d[x*4+1] = d[x*4+2] = d[x*4+3] = 0; continue; }
+            int r = s[x*4+2] * 255 / a, g = s[x*4+1] * 255 / a, b = s[x*4+0] * 255 / a;
+            d[x*4+0] = (BYTE)(b > 255 ? 255 : b);
+            d[x*4+1] = (BYTE)(g > 255 ? 255 : g);
+            d[x*4+2] = (BYTE)(r > 255 ? 255 : r);
+            d[x*4+3] = a;
+        }
+    }
+    out.UnlockBits(&od);
+    bmp->UnlockBits(&bd);
+    CLSID c = SnapPngClsid();
+    return out.Save(path, &c, NULL) == Ok;
+}
+static void SnapPath(const wchar_t* leaf, wchar_t* out, int cch){
+    wchar_t base[MAX_PATH];
+    if (SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, base) != S_OK) base[0] = 0;
+    lstrcpynW(out, base, cch);
+    lstrcatW(out, L"\\GlassDock\\");
+    lstrcatW(out, leaf);
+}
+static void SnapWidget(){
+    if (!g_hwnd) return;
+    RECT rc; GetClientRect(g_hwnd, &rc);
+    Bitmap* b = GetPaintBitmap(rc.right, rc.bottom);
+    if (!b) return;
+    { Graphics g(b); g.Clear(Color(0, 0, 0, 0)); g_paintDst = b;
+      PaintAll(g, rc.right, rc.bottom); g_paintDst = NULL; g.Flush(); }
+    wchar_t p[MAX_PATH]; SnapPath(L"snap_widget.png", p, MAX_PATH);
+    SaveSnapPng(b, p);
+}
+static void SnapSettings(){
+    if (!g_setHwnd) return;
+    int w = S(SET_W), h = S(SET_H);
+    Bitmap* b = GetSetPaintBitmap(w, h);
+    if (!b) return;
+    { Graphics g(b); g.Clear(Color(0, 0, 0, 0)); g_paintDst = b;
+      PaintSettings(g, w, h); g_paintDst = NULL; g.Flush(); }
+    wchar_t p[MAX_PATH]; SnapPath(L"snap_settings.png", p, MAX_PATH);
+    SaveSnapPng(b, p);
+}
 
 static RECT LR(int x, int y, int w, int h){ return {S(x), S(y), S(x + w), S(y + h)}; }
 
@@ -1785,21 +1769,16 @@ static RECT R_FolderChange(){ return LR(306, 66, 68, 32); }
 static int  SliderTrackY(int i){ int y[3] = {162, 214, 266}; return S(y[i]); }
 static RECT R_SliderHit(int i){ int y[3] = {162, 214, 266}; return LR(18, y[i] - 12, 364, 24); }
 static int  SliderLabelY(int i){ int y[3] = {140, 192, 244}; return S(y[i]); }
-static RECT R_Preset(int i){ return LR(20 + i * 38, 366, 30, 30); }
-static RECT R_HexBox(){ return LR(250, 366, 84, 30); }
-static RECT R_CustomColor(){ return LR(338, 366, 30, 30); }
-static RECT R_CheckAuto(){ return LR(18, 424, 344, 24); }
-static RECT R_HzLabel(){ return LR(20, 450, 120, 20); }
-static RECT R_HzOption(int i){ return LR(110 + i * 44, 448, 38, 24); }
-static RECT R_Reset(){ return LR(20, 492, 100, 34); }
-static RECT R_Done(){ return LR(284, 492, 84, 34); }
-
-// refresh-rate presets the user can pick from (Hz)
-static const int g_hzPresets[6] = { 60, 90, 120, 144, 165, 240 };
+static RECT R_Preset(int i){ return LR(20 + i * 38, 318, 30, 30); }
+static RECT R_HexBox(){ return LR(250, 318, 84, 30); }
+static RECT R_CustomColor(){ return LR(338, 318, 30, 30); }
+static RECT R_CheckAuto(){ return LR(18, 376, 344, 24); }
+static RECT R_Reset(){ return LR(20, 448, 100, 34); }
+static RECT R_Done(){ return LR(284, 448, 84, 34); }
 
 enum { SH_NONE = 0, SH_CLOSE, SH_FOLDER, SH_SLIDER0, SH_SLIDER1, SH_SLIDER2,
        SH_P0, SH_P1, SH_P2, SH_P3, SH_P4, SH_P5, SH_CUSTOM, SH_HEX, SH_AUTO,
-       SH_HZ0, SH_HZ1, SH_HZ2, SH_HZ3, SH_HZ4, SH_HZ5, SH_RESET, SH_DONE };
+       SH_RESET, SH_DONE };
 
 static int  g_setHover = SH_NONE;
 static int  g_setActive = SH_NONE;
@@ -1983,7 +1962,7 @@ static void PaintSettings(Graphics& g, int w, int h){
     }
 
     // divider
-    Pen dp(Color(44, 255, 255, 255), 1.0f);
+    Pen dp(Color(110, 255, 255, 255), 1.0f);
     g.DrawLine(&dp, (REAL)S(16), (REAL)S(52), (REAL)(w - S(16)), (REAL)S(52));
 
     // folder card
@@ -2077,7 +2056,7 @@ static void PaintSettings(Graphics& g, int w, int h){
     }
 
     // background color
-    DrawSectionLabel(g, 20, 344, L"背景色", Color(238, tc.GetR(), tc.GetG(), tc.GetB()));
+    DrawSectionLabel(g, 20, 296, L"背景色", Color(238, tc.GetR(), tc.GetG(), tc.GetB()));
     for (int i = 0; i < 6; i++){
         RECT sr = R_Preset(i);
         RectF sr2((REAL)sr.left, (REAL)sr.top, (REAL)(sr.right - sr.left), (REAL)(sr.bottom - sr.top));
@@ -2145,57 +2124,14 @@ static void PaintSettings(Graphics& g, int w, int h){
     }
 
     // options
-    DrawSectionLabel(g, 20, 404, L"选项", Color(238, tc.GetR(), tc.GetG(), tc.GetB()));
+    DrawSectionLabel(g, 20, 356, L"选项", Color(238, tc.GetR(), tc.GetG(), tc.GetB()));
     DrawCheckbox(g, R_CheckAuto(), cfg.autostart, L"开机自动启动", tc, hi, g_setHover == SH_AUTO);
-    {
-        // refresh-rate row: pick how fluid the live drag / resize feels
-        RECT hl = R_HzLabel();
-        RectF hr((REAL)hl.left, (REAL)hl.top, (REAL)(hl.right - hl.left), (REAL)(hl.bottom - hl.top));
-        StringFormat hsf;
-        hsf.SetFormatFlags(StringFormatFlagsNoWrap);
-        hsf.SetLineAlignment(StringAlignmentCenter);
-        SolidBrush hb(dim);
-        DrawTextCrisp(g, L"拖动刷新率", g_fontUi, hr, &hsf, &hb);
-
-        for (int i = 0; i < 6; i++){
-            RECT o = R_HzOption(i);
-            RectF or2((REAL)o.left, (REAL)o.top, (REAL)(o.right - o.left), (REAL)(o.bottom - o.top));
-            GraphicsPath op;
-            RoundedRect(op, or2, (REAL)S(7));
-            bool sel = (cfg.refreshHz == g_hzPresets[i]);
-            bool hov = (g_setHover == SH_HZ0 + i);
-            if (sel){
-                SolidBrush of(hi);
-                g.FillPath(&of, &op);
-            } else {
-                SolidBrush of(Color(hov ? 60 : 34, 255, 255, 255));
-                g.FillPath(&of, &op);
-            }
-            Pen ope(Color(hov || sel ? 170 : 70, 255, 255, 255), 1.0f);
-            g.DrawPath(&ope, &op);
-            wchar_t buf[16];
-            wsprintfW(buf, L"%d", g_hzPresets[i]);
-            StringFormat osf;
-            osf.SetAlignment(StringAlignmentCenter);
-            osf.SetLineAlignment(StringAlignmentCenter);
-            osf.SetFormatFlags(StringFormatFlagsNoWrap);
-            SolidBrush otb(sel ? TextOn(hi) : (hov ? tc : dim));
-            DrawTextCrisp(g, buf, g_fontSmall, or2, &osf, &otb);
-        }
-    }
-    {
-        SolidBrush nb(Color(150, tc.GetR(), tc.GetG(), tc.GetB()));
-        RectF nr((REAL)S(46), (REAL)S(470), (REAL)S(330), (REAL)S(18));
-        StringFormat nsf;
-        nsf.SetFormatFlags(StringFormatFlagsNoWrap);
-        nsf.SetLineAlignment(StringAlignmentCenter);
-        DrawTextCrisp(g, L"桌面小组件 · 只在桌面显示，不会盖住其他窗口", g_fontSmall, nr, &nsf, &nb);
-    }
-
+    // refresh rate is fixed at 60 Hz — the picker row was removed; the space it used
+    // to occupy is intentionally left blank (user: "空着的地方就空着，留白").
     // bottom buttons
     {
-        Pen dline(Color(40, 255, 255, 255), 1.0f);
-        g.DrawLine(&dline, (REAL)S(16), (REAL)S(478), (REAL)(w - S(16)), (REAL)S(478));
+        Pen dline(Color(110, 255, 255, 255), 1.0f);
+        g.DrawLine(&dline, (REAL)S(16), (REAL)S(436), (REAL)(w - S(16)), (REAL)S(436));
 
         RECT rr = R_Reset();
         RectF rrf((REAL)rr.left, (REAL)rr.top, (REAL)(rr.right - rr.left), (REAL)(rr.bottom - rr.top));
@@ -2234,7 +2170,7 @@ static void PaintSettings(Graphics& g, int w, int h){
     // live-apply hint between the two bottom buttons
     {
         SolidBrush hb(Color(140, tc.GetR(), tc.GetG(), tc.GetB()));
-        RectF hr((REAL)S(128), (REAL)S(492), (REAL)S(150), (REAL)S(34));
+        RectF hr((REAL)S(128), (REAL)S(448), (REAL)S(150), (REAL)S(34));
         StringFormat hf;
         hf.SetAlignment(StringAlignmentCenter);
         hf.SetLineAlignment(StringAlignmentCenter);
@@ -2275,7 +2211,6 @@ static int SetHit(POINT p){
     if (InRect(R_HexBox(), p)) return SH_HEX;
     if (InRect(R_CustomColor(), p)) return SH_CUSTOM;
     if (InRect(R_CheckAuto(), p)) return SH_AUTO;
-    for (int i = 0; i < 6; i++) if (InRect(R_HzOption(i), p)) return SH_HZ0 + i;
     if (InRect(R_Reset(), p)) return SH_RESET;
     if (InRect(R_Done(), p)) return SH_DONE;
     return SH_NONE;
@@ -2379,6 +2314,9 @@ static void SettingsReset(){
 
 static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam){
     switch (msg){
+        case WM_SNAP:
+            SnapSettings();
+            return 0;
         case WM_ERASEBKGND:
             return 1;
         case WM_ACTIVATE:
@@ -2432,15 +2370,6 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 RepaintSet();
                 return 0;
             }
-            if (hit >= SH_HZ0 && hit <= SH_HZ5){
-                cfg.refreshHz = g_hzPresets[hit - SH_HZ0];
-                g_liveBgInterval = (DWORD)(1000.0 / cfg.refreshHz + 0.5);
-                if (g_liveBgInterval < 4) g_liveBgInterval = 4;
-                if (g_liveBgInterval > 33) g_liveBgInterval = 33;
-                SaveConfig();
-                RepaintSet();
-                return 0;
-            }
             if (hit == SH_RESET){ SettingsReset(); return 0; }
             if (hit == SH_DONE){ SaveConfig(); DestroyWindow(hwnd); return 0; }
 
@@ -2485,7 +2414,6 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             bool hand = (hit == SH_CLOSE || hit == SH_FOLDER || hit == SH_CUSTOM ||
                          hit == SH_AUTO || hit == SH_RESET || hit == SH_DONE ||
                          (hit >= SH_P0 && hit <= SH_P5) ||
-                         (hit >= SH_HZ0 && hit <= SH_HZ5) ||
                          (hit >= SH_SLIDER0 && hit <= SH_SLIDER2));
             if (hit == SH_HEX) SetCursor(LoadCursorW(NULL, IDC_IBEAM));
             else SetCursor(LoadCursorW(NULL, hand ? IDC_HAND : IDC_ARROW));
@@ -2638,8 +2566,8 @@ static LPWSTR CursorForMode(ResizeMode m){
 }
 
 static int HitRow(POINT p, int w, int h){
-    if (p.y < TitleH() || p.y >= h) return -1;
-    int i = (p.y - TitleH() + g_scroll) / RowH();
+    if (p.y < ListTop() || p.y >= h) return -1;
+    int i = (p.y - ListTop() + g_scroll) / RowH();
     if (i >= 0 && i < (int)g_rows.size()) return i;
     return -1;
 }
@@ -2657,7 +2585,7 @@ static void SetCursors(POINT p, int w, int h){
     int row = HitRow(p, w, h);
     if (row >= 0 && g_rows[row].item->isDir){
         int x = LeftPad() + g_rows[row].depth * Indent();
-        int y = TitleH() - g_scroll + row * RowH();
+        int y = ListTop() - g_scroll + row * RowH();
         if (p.x >= x && p.x < x + S(16)){ SetCursor(LoadCursorW(NULL, IDC_HAND)); return; }
     }
     SetCursor(LoadCursorW(NULL, IDC_ARROW));
@@ -2688,13 +2616,28 @@ static void ShowContextMenu(POINT pt){
 // ---------------- tray icon / global hotkey ----------------
 #define WM_TRAYICON (WM_APP + 1)
 #define WM_SHOWME   (WM_APP + 99)
+#define WM_RECOVER  (WM_APP + 98)   // P7: deferred single-flight recovery
 #define TIMER_BG    1
 #define TIMER_GUARD 3
 static bool g_userHidden = false;   // user closed it on purpose -> guard keeps hands off
 static int  g_guardTick = 0;
+static int  g_hostCheckTick = 0;    // P7: host re-probe cadence (every 30 ticks)
+static bool g_recoveryPending = false; // P7: a WM_RECOVER is already posted
+static UINT g_msgTaskbarCreated = 0;   // P7: explorer-restart message id
 static bool g_trayAdded = false;
 static bool g_balloonShown = false;
 static const UINT HOTKEY_TOGGLE = 1;
+
+// P7 visibility state machine: user-hide, Win+D minimize, recovery and
+// host-unavailable are distinct states and must never be conflated.
+enum class WidgetVisibilityState {
+    VisibleOnDesktop,   // shown and anchored
+    UserHidden,         // user chose hide -> no automatic recovery at all
+    SystemMinimized,    // shell minimized us (Win+D / show-desktop)
+    Recovering,         // WM_RECOVER posted, restore in flight
+    HostUnavailable     // desktop host not found, wait for next probe
+};
+static WidgetVisibilityState g_visState = WidgetVisibilityState::VisibleOnDesktop;
 
 static void AddTrayIcon(){
     if (g_trayAdded) return;
@@ -2723,12 +2666,14 @@ static void ShowWidget(){
     RenderBackground();
     BOOL wasVis = IsWindowVisible(g_hwnd);
     g_userHidden = false;
+    g_visState = WidgetVisibilityState::VisibleOnDesktop;
     SitOnDesktop();   // shows + re-anchors above the wallpaper in one atomic call
     if (!wasVis) Repaint();
 }
 
 static void HideWidget(){
     g_userHidden = true;
+    g_visState = WidgetVisibilityState::UserHidden;
     ShowWindow(g_hwnd, SW_HIDE);
 }
 
@@ -2772,6 +2717,83 @@ static void ShowTrayMenu(){
     if (cmd) SendMessageW(g_hwnd, WM_COMMAND, (WPARAM)cmd, 0);
 }
 
+// ---------------- P7: recovery scheduling & guard helpers ----------------
+static void RequestRecovery(){
+    if (!g_hwnd || !IsWindow(g_hwnd)) return;
+    if (g_userHidden || g_dragging || g_resizing) return;
+    if (g_recoveryPending) return;          // never double-post
+    g_recoveryPending = true;
+    g_visState = WidgetVisibilityState::Recovering;
+    PostMessageW(g_hwnd, WM_RECOVER, 0, 0);
+}
+
+// The widget is correctly parked when it sits ABOVE the desktop host (Progman) in
+// the z-order. Parked above Progman it behaves exactly like the desktop icons:
+// below every window, above the wallpaper. The only failure mode worth correcting
+// is being buried BELOW the host (DWM can park windows under the wallpaper band),
+// which is detected by comparing enumeration order.
+static void CheckZOrder(){
+    if (g_userHidden || g_dragging || g_resizing) return;
+    if (!g_hwnd || !IsWindow(g_hwnd)) return;
+    DesktopHostInfo h = ProbeDesktopHost();
+    if (!h.valid || !h.hwnd) return;
+    // enumerate: is the host reached BEFORE the widget (top-to-bottom)?
+    struct Scan { HWND w; HWND host; bool hostSeen; bool buried; };
+    Scan s = {g_hwnd, h.hwnd, false, false};
+    EnumWindows([](HWND win, LPARAM lp) -> BOOL {
+        Scan* sc = (Scan*)lp;
+        if (win == sc->w){
+            if (sc->hostSeen) sc->buried = true;
+            return FALSE;
+        }
+        if (win == sc->host){ sc->hostSeen = true; return FALSE; }
+        return TRUE;
+    }, (LPARAM)&s);
+    if (!s.buried) return;                  // parked above the host — correct
+    HWND prevWidget = GetWindow(g_hwnd, GW_HWNDPREV);
+    DiagLog(L"CheckZOrder: buried below host (prev=0x%X host=0x%X) -> re-anchor",
+            (unsigned)(UINT_PTR)prevWidget, (unsigned)(UINT_PTR)h.hwnd);
+    SitOnDesktop();
+    Repaint();
+}
+
+static void CheckVisibility(){
+    if (g_userHidden || g_dragging || g_resizing) return;
+    if (!g_hwnd || !IsWindow(g_hwnd)) return;
+    if (!IsWindowVisible(g_hwnd) || IsIconic(g_hwnd)){
+        if (g_visState != WidgetVisibilityState::SystemMinimized &&
+            g_visState != WidgetVisibilityState::Recovering)
+            g_visState = WidgetVisibilityState::SystemMinimized;
+        RequestRecovery();
+    }
+}
+
+static void CheckDesktopHost(){
+    if (g_userHidden || g_dragging || g_resizing) return;
+    if (!g_hwnd || !IsWindow(g_hwnd)) return;
+    DesktopHostInfo prev = g_lastHost;
+    DesktopHostInfo h = ProbeDesktopHost();
+    if (!h.valid){
+        g_visState = WidgetVisibilityState::HostUnavailable;
+        return;
+    }
+    if (h.hwnd != prev.hwnd || h.isLegacyDesktop != prev.isLegacyDesktop || h.isProgman != prev.isProgman){
+        DiagLog(L"CheckDesktopHost: host changed, re-anchoring");
+        DesktopPlacementResult r = SitOnDesktop();
+        if (r == DesktopPlacementResult::Success &&
+            (!IsWindowVisible(g_hwnd) || IsIconic(g_hwnd))) Repaint();
+    }
+}
+
+// One guard tick: visibility every second, z-order every 5 ticks, host every 30 ticks.
+// Nothing is touched while the user is dragging, resizing or has hidden the widget.
+static void GuardTick(){
+    if (g_userHidden) return;
+    CheckVisibility();
+    if (++g_guardTick >= 5){ g_guardTick = 0; CheckZOrder(); }
+    if (++g_hostCheckTick >= 30){ g_hostCheckTick = 0; CheckDesktopHost(); }
+}
+
 // ---------------- window proc ----------------
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam){
     switch (msg){
@@ -2784,44 +2806,71 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         case WM_SHOWME:
             ShowWidget();
             return 0;
+        case WM_RECOVER:
+            // single-flight recovery posted by WM_SIZE / guard: the only path that
+            // actually restores the widget after Win+D or a stray hide. Re-checks the
+            // user-hidden flag so a recovery posted before the user hid the widget
+            // never resurrects it.
+            g_recoveryPending = false;
+            if (g_userHidden || !IsWindow(hwnd)) return 0;
+            {
+                bool wasHidden = !IsWindowVisible(hwnd) || IsIconic(hwnd);
+                DesktopPlacementResult r = SitOnDesktop();
+                if (r == DesktopPlacementResult::Success){
+                    g_visState = WidgetVisibilityState::VisibleOnDesktop;
+                    if (wasHidden) Repaint();
+                } else if (r == DesktopPlacementResult::HostUnavailable){
+                    g_visState = WidgetVisibilityState::HostUnavailable;
+                }
+            }
+            return 0;
         case WM_HOTKEY:
             if (wParam == HOTKEY_TOGGLE) ToggleWidget();
             return 0;
         case WM_SETTINGCHANGE:
             // wallpaper / theme may have changed -> refresh the captured background
             RenderBackground();
+            KeepOnScreen();     // P7: work area may have moved (taskbar, display reconfig)
             return 0;
         case WM_ACTIVATE:
             // it never takes focus (WS_EX_NOACTIVATE); if something still tries, stay put
             return 0;
         case WM_SIZE:
-            // a desktop gadget must stay put; if anything tries to minimize us, restore
+            // P7: record the shell minimize (Win+D) and schedule ONE deferred recovery.
+            // No direct ShowWindow here — that would race with the guard timer and the
+            // shell's own message sequence.
             if (wParam == SIZE_MINIMIZED){
-                ShowWindow(hwnd, SW_SHOW);
-                SitOnDesktop();
-                Repaint();
+                g_visState = WidgetVisibilityState::SystemMinimized;
+                RequestRecovery();
             }
+            return 0;
+        case WM_DISPLAYCHANGE:
+            // resolution / monitor topology changed: pull back on-screen if needed and
+            // re-anchor (the desktop host may have been rebuilt). User-saved positions
+            // are only touched when the window actually leaves the visible area.
+            DiagLog(L"WM_DISPLAYCHANGE");
+            KeepOnScreen();
+            SitOnDesktop();
             return 0;
         case WM_TIMER:
             if (wParam == TIMER_BG){
                 // In true see-through mode there is no wallpaper snapshot to refresh;
                 // this timer is now a no-op (kept so a future frosted-glass mode can
-                // hook back in). The guard timer below still keeps us anchored.
+                // hook back in).
             } else if (wParam == TIMER_GUARD){
-                // Keep the gadget glued to the desktop. Re-show it if anything hid or
-                // minimized it, and periodically re-anchor it above Progman so it never
-                // gets buried below the wallpaper by a stray z-order change.
-                if (!g_userHidden){
-                    if (!IsWindowVisible(hwnd) || IsIconic(hwnd)){
-                        SitOnDesktop();
-                        Repaint();
-                    }
-                    if (++g_guardTick >= 5){
-                        g_guardTick = 0;
-                        if (!g_dragging && !g_resizing) SitOnDesktop();
-                    }
-                }
+                GuardTick();
+            } else if (wParam == TIMER_LIVE){
+                KillTimer(hwnd, TIMER_LIVE);
+                InterlockedExchange(&g_livePending, 0);
+                LiveReload();
             }
+            return 0;
+        case WM_LIVE:
+            // debounce: coalesce a burst of directory notifications into one rebuild
+            SetTimer(hwnd, TIMER_LIVE, 120, NULL);
+            return 0;
+        case WM_SNAP:
+            SnapWidget();
             return 0;
         case WM_NCHITTEST:
             // The whole window is one solid hit target. On a per-pixel-alpha layered
@@ -2873,7 +2922,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             int row = HitRow(p, w, h);
             if (row >= 0 && g_rows[row].item->isDir){
                 int x = LeftPad() + g_rows[row].depth * Indent();
-                int y = TitleH() - g_scroll + row * RowH();
+                int y = ListTop() - g_scroll + row * RowH();
                 if (p.x >= x && p.x < x + S(16) && p.y >= y && p.y < y + RowH()){
                     Toggle(g_rows[row].item);
                 }
@@ -2962,7 +3011,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 g_pressedBtn = -1;
                 if (HitButton(p, w) == btn){
                     switch (btn){
-                        case 0: Reload(); RenderBackground(); break;
                         case 1: OpenSettings(); break;
                         case 2: HideWidget(); NotifyHidden(); break;
                     }
@@ -2979,7 +3027,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 // if dir and clicked on arrow, toggle; else open
                 if (it->isDir){
                     int x = LeftPad() + g_rows[row].depth * Indent();
-                    int y = TitleH() - g_scroll + row * RowH();
+                    int y = ListTop() - g_scroll + row * RowH();
                     if (p.x >= x && p.x < x + S(16) && p.y >= y && p.y < y + RowH()){ Toggle(it); return 0; }
                 }
                 OpenItem(it);
@@ -3019,11 +3067,29 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             DestroyWindow(hwnd);
             return 0;
         case WM_DESTROY:
+            StopWatch();
             RemoveTrayIcon();
             UnregisterHotKey(hwnd, HOTKEY_TOGGLE);
             SaveConfig();
             PostQuitMessage(0);
             return 0;
+        default:
+            // P7: Explorer restarted. The window survives (it belongs to our process),
+            // but the tray and the desktop host are brand new. Re-probe the host,
+            // re-add the tray icon once, re-anchor — never destroy the window, never
+            // create a second instance, never touch saved config.
+            if (msg == g_msgTaskbarCreated && g_msgTaskbarCreated){
+                DiagLog(L"TaskbarCreated: shell restarted");
+                if (IsWindow(hwnd)){
+                    ProbeDesktopHost();
+                    if (!g_trayAdded) AddTrayIcon();
+                    if (!g_userHidden){
+                        if (SitOnDesktop() == DesktopPlacementResult::Success) Repaint();
+                    }
+                }
+                return 0;
+            }
+            break;
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
@@ -3069,7 +3135,7 @@ static void RunUninstall(){
     ShellExecuteW(NULL, L"open", L"cmd.exe", cmd, NULL, SW_HIDE);
 }
 
-int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int){
+int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int){
     g_hInst = hInstance;
     SetProcessDPIAware();
 
@@ -3079,6 +3145,15 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int){
     }
 
     LoadConfig();
+    // P7: diagnostics — off by default; "debugLog=1" in config.ini or a --log
+    // command line enables %APPDATA%\GlassDock\p7.log.
+    if (pCmdLine && wcsstr(pCmdLine, L"--log")) cfg.debugLog = true;
+    g_diagEnabled = cfg.debugLog;
+    wchar_t build[32] = L"?";
+    DWORD bsz = sizeof(build);
+    RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
+                 L"CurrentBuildNumber", RRF_RT_REG_SZ, NULL, build, &bsz);
+    DiagLog(L"boot pid=%lu build=%ls", (unsigned long)GetCurrentProcessId(), build);
     // live drag rebuild interval from the chosen refresh rate (Hz -> ms), clamped so a
     // very low rate still feels responsive and a very high one doesn't peg the CPU
     g_liveBgInterval = (DWORD)(1000.0 / cfg.refreshHz + 0.5);
@@ -3126,6 +3201,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int){
     sc.hbrBackground = NULL;
     RegisterClassW(&sc);
 
+    // P7: explorer-restart notification (fires on taskbar/shell recreation)
+    g_msgTaskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
+
     RECT wa; SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
     int x = cfg.x, y = cfg.y;
     if (x < 0 || y < 0){
@@ -3147,6 +3225,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int){
     AddTrayIcon();
     SetTimer(g_hwnd, TIMER_BG, 900, NULL);
     SetTimer(g_hwnd, TIMER_GUARD, 1000, NULL);
+    StartWatch();
 
     ShowWindow(g_hwnd, SW_SHOW);
     SitOnDesktop();
@@ -3167,9 +3246,6 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int){
     KillTimer(g_hwnd, TIMER_GUARD);
     FreeIcons();
     delete g_root;
-    delete g_bg;
-    delete g_screenShot;
-    delete g_screenShotSmall;
     if (g_bbMain.dc){ if (g_bbMain.bmp) SelectObject(g_bbMain.dc, g_bbMain.old); DeleteDC(g_bbMain.dc); }
     if (g_bbMain.bmp) DeleteObject(g_bbMain.bmp);
     if (g_bbSet.dc){ if (g_bbSet.bmp) SelectObject(g_bbSet.dc, g_bbSet.old); DeleteDC(g_bbSet.dc); }

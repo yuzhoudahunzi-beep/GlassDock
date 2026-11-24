@@ -1,132 +1,216 @@
-# GlassDock
+<p align="center">
+  <img src="docs/screenshots/hero.png" alt="GlassDock — a see-through glass folder widget living on the Windows desktop" width="720">
+</p>
 
-一个 Windows **桌面**文件夹小组件：把任意文件夹的内容以列表贴在桌面上，双击直接打开；背景是自绘的“毛玻璃 / 亚克力”质感，长宽、透明度、背景色都能实时调。
+<h1 align="center">GlassDock</h1>
 
-它只待在桌面上：不会盖住你正在用的窗口，切到别的程序时自动沉到桌面层，`Win+D` 回到桌面它还在。
+<p align="center">
+  <b>把任意文件夹，变成桌面上的一块活玻璃。</b><br>
+  <i>Turn any folder into a living piece of glass on your desktop.</i>
+</p>
 
-![GlassDock 主界面](docs/screenshot.png)
+<p align="center">
+  <a href="#中文"><img src="https://img.shields.io/badge/语言-中文-243447?style=flat-square" alt="中文"></a>
+  <a href="#english"><img src="https://img.shields.io/badge/Lang-English-243447?style=flat-square" alt="English"></a>
+  <img src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078D6?style=flat-square&logo=windows&logoColor=white" alt="Windows 10 | 11">
+  <img src="https://img.shields.io/badge/C%2B%2B-17-00599C?style=flat-square&logo=cplusplus&logoColor=white" alt="C++17">
+  <img src="https://img.shields.io/badge/依赖-零运行时依赖-success?style=flat-square" alt="zero runtime deps">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green?style=flat-square" alt="MIT"></a>
+</p>
 
-![GlassDock 设置面板](docs/settings.png)
+<p align="center">
+  <a href="#中文">中文</a> · <a href="#english">English</a> ·
+  <a href="docs/GLASSDOCK-FULL-MANUAL.md">完整手册</a> ·
+  <a href="docs/P7_CHANGELOG.md">变更日志</a>
+</p>
 
-## 功能特性
+---
 
-- **文件夹列表**：指向任意文件夹，文件夹优先排序，双击用系统默认程序打开；文件夹行可点三角展开 / 收起，滚轮滚动。
-- **真·桌面玻璃**：窗口用逐像素透明（per-pixel alpha）绘制，桌面是什么就透什么——静态壁纸、Wallpaper Engine 的动态场景都直接透出，不截屏、不模糊，没有“上一次画面”的残留。
-- **只在桌面出现**：窗口不置顶、也不抢焦点（`WS_EX_NOACTIVATE`），点它不会把它“激活到前台”或弄丢；任何程序窗口都盖在它上面，切走时它自动回到桌面层，不挡游戏。
-- **点它不会消失**：放在桌面层用的是“插到最下面那个普通窗口之后”，而不是容易钻到壁纸后面的 `HWND_BOTTOM`，所以回到桌面后点它、点空白处，它都乖乖待在原位。
-- **玻璃质感**：逐像素透明的玻璃面板，叠加一层可调浓度的背景色调（不透明度滑块）与手绘的圆角玻璃边框、顶部高光；文字颜色自动适配。
-- **全部可调**：宽度 240–1000 px、高度 240–1200 px、不透明度（背景浓度）0–100%、背景色（6 个预设 + 系统取色器）。
-- **实时预览**：设置面板里拖动滑块，小组件立刻变化，**不需要点保存**；数值改动即时写入配置。
-- **独立设置窗口**：设置是单独的玻璃窗口，和小组件同一套毛玻璃质感，可拖动、可随意关闭；打开时置顶方便操作，失焦后自动恢复普通窗口行为。
-- **字体清晰锐利**：文字用 GDI 灰度抗锯齿渲染（配合系统的 UI 字体），观感等同 Windows 桌面图标标签，不发虚、无彩色毛边。
-- **不会丢**：标题栏故意不放关闭按钮，手滑也点不掉；想隐藏就右键 → 隐藏到托盘，或 `Ctrl+Alt+G`。托盘有图标、桌面 / 开始菜单快捷方式，再双击一次就能叫回来（单实例，不会开出第二个）。
-- **关不掉 / 藏不住兜底**：每秒巡检一次，一旦发现被系统藏起来或被压到壁纸下面，会自己无焦点地回到桌面层；只有你亲手“隐藏到托盘”时它才安静待着。
-- **轻量原生**：C++17 / Win32 / GDI+，单文件 exe，无 .NET、无运行时依赖，常驻内存约 20 MB；静态壁纸下背景几乎零开销，被窗口遮住时自动暂停刷新。
-- **一键安装 / 卸载**：双击 `GlassDock-Setup-1.0.0.exe` 即安装，自带卸载（设置 → 应用 → GlassDock → 卸载）。
+<a id="中文"></a>
 
-## 快速开始
+## 中文
 
-1. 下载 `release/GlassDock-Setup-1.0.0.exe`。
-2. 双击安装 → 选择“是”立即启动。
-3. 桌面和开始菜单会生成 GlassDock 快捷方式。
-4. 点标题栏的齿轮打开设置，选文件夹、拖滑块调到喜欢的样子。
+### 它是什么
 
-## 操作说明
+GlassDock 是一个 **Windows 桌面文件夹小组件**：选定一个文件夹，它的内容就以一列清单的形式贴在桌面上，双击即用系统默认程序打开。面板是**逐像素真透明**的玻璃——壁纸是什么，它就透什么，包括 Wallpaper Engine 的动态场景；不截屏、不模糊、没有"上一帧画面"的残留。
+
+它恪守桌面组件的本分：**不置顶、不抢焦点**，任何应用窗口都自然地盖在它上面；`Win+D` 回到桌面，它还在原位；Explorer 重启、换分辨率、插拔显示器，它自己回到桌面层。文件夹里新增、删除、改名，列表**实时跟着变**，不需要任何手动刷新。
+
+单文件 exe，C++17 / Win32 / GDI+ 手写，无 .NET、无运行时依赖、无第三方库。
+
+### 特性
+
+- **真·透明玻璃**：`UpdateLayeredWindow` + 预乘 alpha 表面，背景像素 alpha=0，DWM 实时合成桌面内容；圆角玻璃边框、顶部高光与内缘反光，读出"有厚度的玻璃"而非贴片。
+- **桌面驻留**：三级桌面宿主探测（`SHELLDLL_DefView` → `Program Manager` → 明确失败），锚定在壁纸层之上、所有普通窗口之下；`Win+D` 状态机 + 单飞延迟恢复；监听 `TaskbarCreated` 应对 Explorer 重启；`WM_DISPLAYCHANGE` / `WM_SETTINGCHANGE` 自动贴回可见区域。
+- **实时刷新**：`ReadDirectoryChangesW` 递归监听根目录，120 ms 去抖合并通知；刷新保留已展开的目录与滚动位置，列表不跳。
+- **系统级字体观感**：读取系统「桌面图标字体」（`HKCU\...\WindowMetrics\IconFont`），3 倍超采样灰度抗锯齿——边缘是连续 alpha 渐变，顺滑、无锯齿、无 ClearType 彩色毛边，混排字号观感统一。
+- **全部可调，即时生效**：宽 / 高 / 背景浓度滑块，6 个预设色 + HEX 输入 + 系统取色器；拖动滑块主窗口立刻变化，没有"保存"按钮。
+- **树状列表**：文件夹优先排序，三角展开 / 收起，滚轮滚动，悬停高亮pill，双击打开。
+- **叫得回、丢不了**：`Ctrl+Alt+G` 全局热键、托盘图标、单实例互斥（二次启动唤回已有窗口）；标题栏故意不放关闭按钮，手滑点不掉。
+- **轻量**：常驻内存约 20 MB；真透明模式下背景零重绘开销，仅 1 s 一次的桌面守卫定时器。
+
+### 截图
+
+| 主界面（真透明，透出壁纸） | 设置面板 | 头部细节 |
+| :---: | :---: | :---: |
+| <img src="docs/screenshots/widget.png" width="260"> | <img src="docs/screenshots/settings.png" width="260"> | <img src="docs/screenshots/header.png" width="260"> |
+
+> 截图由程序自身的真 alpha 表面导出后与壁纸合成（`WM_SNAP` 调试消息），与桌面实际观感一致。
+
+### 安装与使用
+
+**安装版**：下载 [`release/GlassDock-Setup-1.0.0.exe`](release/GlassDock-Setup-1.0.0.exe)，双击安装，可选立即启动；自带卸载项（设置 → 应用 → GlassDock）。
+**便携版**：下载 [`release/GlassDock.exe`](release/GlassDock.exe)，放任意目录双击即可，配置写在 `%APPDATA%\GlassDock\`。
 
 | 操作 | 效果 |
 | --- | --- |
-| 拖动标题栏 | 移动小组件（位置自动记忆） |
-| 拖动右下角 | 调整大小（超出屏幕会自动贴回可见区域） |
-| 双击文件 / 文件夹 | 用默认程序打开 |
-| 点击文件夹左侧三角 | 展开 / 收起子项 |
-| 滚轮 | 滚动列表（双缓冲绘制，不闪） |
-| 右键 | 菜单：选择文件夹 / 设置 / 刷新背景 / 开机自启 / 隐藏到托盘 / 退出 |
-| 标题栏图标（左 → 右） | 刷新背景 / 设置 |
-| `Ctrl+Alt+G` | 全局热键，把小组件叫到桌面最前 / 隐藏 |
-| 托盘图标（左键 / 双击） | 显示 / 隐藏；右键有菜单 |
+| 拖动标题栏 / 右下角 | 移动 / 缩放（位置与尺寸自动记忆，出屏自动贴回） |
+| 双击文件、文件夹 | 系统默认程序打开 |
+| 点文件夹左侧三角 | 展开 / 收起子项 |
+| 滚轮 | 滚动列表 |
+| 齿轮 / 右键 → 设置 | 打开设置面板 |
+| 右键 | 选择文件夹 / 设置 / 刷新背景 / 隐藏到托盘 / 退出 |
+| `Ctrl+Alt+G` / 托盘双击 / 再启动一次 | 唤回并锚定到桌面层（不置顶、不抢焦点） |
 
-### 它为什么“看不见”了？
+**它"看不见"了？** 它本来就压在桌面层：浏览器、游戏在前台时它被盖住是**有意的**。回桌面就在；若连桌面都找不到，按 `Ctrl+Alt+G`、点托盘、或再双击一次快捷方式，任意一条都能叫回。
 
-它是桌面小组件，本来就压在桌面层：浏览器、游戏、聊天窗口在前台时，它会被正常盖住 —— 这是有意的。把窗口最小化、按 `Win+D` 回桌面，它就在原位；**点它、点桌面空白处都不会让它消失**（它从不抢焦点）。
-
-如果连桌面都找不到它，按顺序试任意一条：
-
-1. 按 `Ctrl+Alt+G`（会把小组件临时置顶 5 秒让你看到，然后自动回桌面层）；
-2. 点系统托盘里的 GlassDock 图标（Win11 在任务栏右侧 `^` 展开面板里，可拖到任务栏常显）；
-3. 再双击一次桌面 / 开始菜单的 GlassDock 快捷方式（单实例，会直接把已有窗口叫回来）；
-4. 托盘右键 → 退出，再双击快捷方式重启（配置和位置都会保留）。
-
-> 备注：`Win+D` 会把桌面小组件一起最小化，程序收到最小化后会自动恢复并留在桌面层，所以回到桌面时它仍然在。
-
-## 设置项
+### 设置面板
 
 | 设置 | 说明 |
 | --- | --- |
-| 文件夹卡片 | 点整张卡片选择要展示的文件夹 |
-| 宽度 / 高度 | 小组件尺寸（像素），拖动即刻缩放 |
-| 不透明度（背景浓度） | 0 = 完全透明只留文字，100 = 纯色面板；线性控制 |
-| 背景色 | 6 个预设 + “自定义…”系统取色器 |
+| 文件夹卡片 | 点整张卡片换目录 |
+| 宽度 / 高度 | 240–1000 / 240–1200 px，拖动即刻缩放 |
+| 不透明度 | 0 = 全透只留文字与玻璃边，100 = 纯色面板 |
+| 背景色 | 6 预设 + HEX + 系统取色器 |
 | 开机自动启动 | 登录后自动出现 |
-| 恢复默认 | 一键还原默认尺寸 / 颜色 / 透明度 |
+| 恢复默认 / 完成 | 一键还原 / 关闭面板（改动早已即时生效） |
 
-底部提示“改动即时生效”：所有滑块与色板松开即写入配置，没有“保存 / 取消”按钮；“完成”只是关掉面板。
+拖动与缩放的实时刷新固定 60 Hz。配置文件：`%APPDATA%\GlassDock\config.ini`（UTF-16 LE），键含 `folder / x / y / width / height / opacity / accent / autostart / foldersFirst / showExt`。
 
-## 配置文件
+### 从源码构建
 
-`%APPDATA%\GlassDock\config.ini`，节 `[GlassDock]`：
-
-| 键 | 含义 |
-| --- | --- |
-| `folder` | 展示的文件夹路径 |
-| `width` / `height` | 宽 / 高（像素） |
-| `x` / `y` | 屏幕坐标 |
-| `opacity` | 背景着色强度 0–100 |
-| `accent` | 背景色（RRGGBB） |
-| `topmost` | 兼容保留，固定写 0（桌面小组件不置顶） |
-| `autostart` | 开机自启（0/1） |
-| `foldersFirst` / `showExt` | 文件夹优先 / 显示扩展名（0/1） |
-
-卸载时会连同配置文件一起清理。
-
-## 从源码构建
-
-环境：MinGW-w64（x86_64，g++ 16+，含 GDI+ / DWM / Shell / Common Controls）。
+环境：MinGW-w64 x86_64（g++ 16+，UCRT），Windows 10/11 SDK 头文件随 MinGW 提供。
 
 ```powershell
-# 按需修改 build.ps1 里的 MinGW 路径后执行
+# 修改 build.ps1 顶部的 $Gpp / $Windres 路径后：
 .\build.ps1
 ```
 
-产物：
+产物：`GlassDock.exe`、`GlassDock.exe.manifest`、`installer\setup.exe`、`release\GlassDock-Setup-1.0.0.exe`。
+主程序单条命令亦可：
 
-- `GlassDock.exe` — 主程序
-- `GlassDock.exe.manifest` — 并行清单（DPI 感知 + Common Controls v6）
-- `installer\setup.exe` — 安装器
-- `release\GlassDock-Setup-1.0.0.exe` — 可分发安装包
+```powershell
+g++ src\GlassDock.cpp src\resource.o -o GlassDock.exe -mwindows -municode -O2 -s -static `
+    -lgdiplus -ldwmapi -lshell32 -lcomctl32 -lole32 -luuid -lshlwapi -lgdi32 -luser32 -ladvapi32
+```
 
-## 上传到 GitHub
+### 技术要点
 
-1. 新建仓库，`git init` 后提交源码（`.gitignore` 已排除构建产物与 `release/`）。
-2. Releases 里新建版本，把 `release/GlassDock-Setup-1.0.0.exe` 作为附件上传。
-3. README 里的 `docs/screenshot.png`、`docs/settings.png` 会直接显示。
+- **真透明而非 Acrylic**：DWM 私有 Acrylic 接口在本机 Win11 实测无效；逐像素 alpha 靠 PARGB 位图 + `ULW_ALPHA` 提交，静态 / 动态壁纸通吃。
+- **文字**：GDI 栅格化覆盖率蒙版 → 3x 超采样盒式降采样 → 预乘合成进 PARGB；不用 GDI+ 软抗锯齿（发虚）、不用 ClearType（透明窗下彩色毛边）。
+- **Z 序**：锚定桌面宿主之上垫底（与桌面图标同级），仅当被埋到宿主之下才重锚；不用 `HWND_BOTTOM`（会钻到壁纸后面）。
+- **设置面板**：独立 `WS_POPUP` 自绘玻璃窗，全部控件手绘；仅激活时临时置顶，失焦即恢复。
+- **安装器**：`installer/setup.cpp` 内嵌主程序与清单，装到 `D:\GlassDock`（D 盘不可用退回 `%LOCALAPPDATA%`），建快捷方式与卸载项。
 
-## 技术要点
+### 文档索引
 
-- 主程序：C++17 + Win32 + GDI+，单文件 `src/GlassDock.cpp`，无第三方依赖。
-- 桌面层定位：窗口带 `WS_EX_NOACTIVATE`，点击、拖动都不抢前台焦点；层级上“插到最下面那个普通窗口之后”（`SitOnDesktop`，跳过 shell 窗口和 topmost 窗口），所以它永远压在壁纸/图标上面、所有应用窗口下面，也不会像 `HWND_BOTTOM` 那样在“显示桌面”后钻到壁纸底下——那正是以前“点一下就消失”的原因。收到 `SIZE_MINIMIZED`（`Win+D`）立刻恢复显示。
-- 桌面守卫：`1 s` 定时器巡检，窗口被 Explorer 藏起来 / 最小化 / 被压到壁纸下时，无焦点地 `SW_SHOWNOACTIVATE` + `SitOnDesktop` 复位；每 5 s 重新确认一次层级。只有用户主动“隐藏到托盘”后才停止干预（`g_userHidden`）。
-- 没有关闭按钮：标题栏只保留刷新与设置，避免误点导致“它不见了”；隐藏 / 退出都在右键菜单和托盘里，属于明确操作。
-- 显式呼出（热键 / 托盘 / 二次启动）才临时 `TOPMOST` 5 秒让你看到，随后自动取消置顶并回到桌面层；后台进程只有 `TOPMOST` 能可靠越过前台窗口，普通 `HWND_TOP` 会被系统忽略。
-- 背景渲染：**真透明（per-pixel alpha）**。界面画进 `PixelFormat32bppPARGB` 位图，`UpdateLayeredWindow(ULW_ALPHA)` 提交；背景像素 alpha=0，桌面（含动态壁纸）直接透出，无截屏、无高斯模糊、无颜色键。
-- 文字渲染：GDI 灰度抗锯齿（`ANTIALIASED_QUALITY`），栅格化成覆盖率蒙版后按预乘 alpha 合成进 PARGB 表面；不用 GDI+（细笔画发虚）、不用 ClearType（逐像素透明窗口下彩色毛边）。
-- 刷新策略：真透明模式下背景由 DWM 实时合成，无需刷新；仅保留一个 1 s 的“桌面守卫”定时器确保窗口始终锚定在桌面层。
-- 绘制：逐像素 alpha 分层窗口（`UpdateLayeredWindow`），滚动列表不闪烁；文字与图标都直接画进 PARGB 表面。
-- 设置面板：`WS_POPUP` 无边框自绘窗口，滑块 / 复选框 / 色板 / 按钮全部手绘；`WS_EX_TOPMOST` 只在被激活时生效，失焦即恢复普通层级；改动即写配置并即时刷新主窗口。
-- 托盘 / 热键 / 单实例：`Shell_NotifyIcon` + `RegisterHotKey` + 命名互斥体，第二次启动会把已有窗口叫到最前。
-- 安装器：`installer/setup.cpp` 把主程序与清单作为资源内嵌，安装到 `D:\GlassDock`（D 盘不可用才退回 `%LOCALAPPDATA%`），创建快捷方式与卸载项；卸载走 `GlassDock.exe --uninstall`，延时清理安装目录与配置。
+- [`docs/GLASSDOCK-FULL-MANUAL.md`](docs/GLASSDOCK-FULL-MANUAL.md) — 完整技术手册（架构 / 消息 / 布局 / 测试门）
+- [`docs/PROJECT_GUIDE.md`](docs/PROJECT_GUIDE.md) — 项目导览
+- [`docs/P7_CHANGELOG.md`](docs/P7_CHANGELOG.md) — 逐轮变更日志（P0–P11）
+- [`docs/P7_TEST_REPORT.md`](docs/P7_TEST_REPORT.md) / [`docs/P7_IMPLEMENTATION_PLAN.md`](docs/P7_IMPLEMENTATION_PLAN.md) — 桌面驻留升级的测试与实施记录
+- [`docs/DESKTOP-EMBED-ASSESSMENT-2026-11-24.md`](docs/DESKTOP-EMBED-ASSESSMENT-2026-11-24.md) — 桌面嵌入方案评估
 
-> 说明：这是真透明玻璃，不是 DWM 的私有 Acrylic API（那套接口在本机 Win11 实测无效）。逐像素透明靠 `UpdateLayeredWindow` + PARGB 实现，静态壁纸和动态壁纸都能直接透出。更完整的技术细节见 [`docs/PROJECT_GUIDE.md`](docs/PROJECT_GUIDE.md)。
+### 已知限制
 
-## 许可
+- 文字固定浅色，不随壁纸明暗自动反色（深色壁纸观感最佳）。
+- 真透明玻璃不做背景模糊（模糊需要截屏，会破坏"活玻璃"）；浓度滑块提供的是着色而非磨砂。
+- 仅在 Windows 11 26H2（2560×1440 @125%）实测；Win10 理论兼容，未逐版本验证。
 
-MIT License，详见 [LICENSE](LICENSE)。
+### 许可
+
+[MIT](LICENSE) © 2026 GlassDock
+
+---
+
+<a id="english"></a>
+
+## English
+
+### What it is
+
+GlassDock is a **Windows desktop folder widget**: pick a folder and its contents live on your desktop as a clean list — double-click to open with the shell default. The panel is **true per-pixel-alpha glass**: whatever your wallpaper is, it shows through, including Wallpaper Engine's live scenes. No screen capture, no blur, no stale "last frame" ghost.
+
+It behaves like a desktop citizen: **never topmost, never steals focus**; every application window naturally covers it; `Win+D` brings you back to it in place; it re-anchors itself after Explorer restarts, resolution changes and monitor hot-plug. Files added, removed or renamed in the folder appear **live** — no manual refresh anywhere.
+
+One self-contained exe, hand-written C++17 / Win32 / GDI+. No .NET, no runtime dependencies, no third-party libraries.
+
+### Features
+
+- **True see-through glass** — premultiplied-alpha surface submitted via `UpdateLayeredWindow`; background pixels carry alpha 0 so DWM composites the live desktop through it. Rounded glass border, top sheen and an inner edge catch-light give it real thickness.
+- **Desktop residency** — three-stage desktop-host probe (`SHELLDLL_DefView` → `Program Manager` → explicit failure), anchored above the wallpaper band and below every ordinary window; a `Win+D` state machine with single-flight deferred recovery; `TaskbarCreated` listener for Explorer restarts; keep-on-screen on display/settings changes.
+- **Live refresh** — recursive `ReadDirectoryChangesW` watch with a 120 ms debounce; expanded folders and scroll position survive every rebuild.
+- **System-native typography** — reads the shell icon font (`IconFont` registry metric) and renders it with 3× supersampled grayscale anti-aliasing: continuous alpha ramps, silky edges, no stair-stepping, no ClearType colour fringing on transparent surfaces.
+- **Everything adjustable, instantly** — width / height / tint-opacity sliders, six preset accents plus HEX entry and the system colour picker; the widget reacts while you drag. No save button.
+- **Tree list** — folders-first sorting, expand/collapse chevrons, wheel scrolling, hover pills, double-click to open.
+- **Always recoverable** — `Ctrl+Alt+G` hotkey, tray icon, single-instance mutex (a second launch summons the existing window); deliberately no close button on the title bar.
+- **Light** — ~20 MB resident; zero background repaint cost in see-through mode, only a 1 s desktop-guard tick.
+
+### Screenshots
+
+| Widget (true transparency) | Settings | Header detail |
+| :---: | :---: | :---: |
+| <img src="docs/screenshots/widget.png" width="260"> | <img src="docs/screenshots/settings.png" width="260"> | <img src="docs/screenshots/header.png" width="260"> |
+
+> Captured from the widget's own true-alpha surface (`WM_SNAP` debug message) and composited over the wallpaper — identical to what DWM shows on the desktop.
+
+### Install & use
+
+**Installer**: [`release/GlassDock-Setup-1.0.0.exe`](release/GlassDock-Setup-1.0.0.exe) — double-click, optionally launch now; registers an uninstall entry.
+**Portable**: [`release/GlassDock.exe`](release/GlassDock.exe) — run from anywhere; config lives in `%APPDATA%\GlassDock\`.
+
+| Action | Effect |
+| --- | --- |
+| Drag title bar / bottom-right corner | Move / resize (remembered; clamped back on-screen) |
+| Double-click a file or folder | Open with the shell default |
+| Click a folder's chevron | Expand / collapse |
+| Mouse wheel | Scroll the list |
+| Gear icon / right-click → Settings | Open the settings panel |
+| Right-click | Pick folder / settings / refresh backdrop / hide to tray / exit |
+| `Ctrl+Alt+G`, tray double-click, relaunch | Summon and re-anchor to the desktop band (no topmost, no focus steal) |
+
+**Can't see it?** It lives *under* your windows by design. Return to the desktop and it is there; if even the desktop seems empty, any of `Ctrl+Alt+G`, the tray icon, or a second launch brings it back.
+
+### Settings
+
+Folder card, width (240–1000 px), height (240–1200 px), tint opacity (0 = pure glass, 100 = solid slab), accent (6 presets + HEX + system picker), run-at-startup, reset-to-defaults. Drag/resize repaint is fixed at 60 Hz. Config: `%APPDATA%\GlassDock\config.ini` (UTF-16 LE).
+
+### Build from source
+
+MinGW-w64 x86_64 (g++ 16+, UCRT). Edit the toolchain paths at the top of `build.ps1`, then run it; or compile the main program directly:
+
+```powershell
+g++ src\GlassDock.cpp src\resource.o -o GlassDock.exe -mwindows -municode -O2 -s -static `
+    -lgdiplus -ldwmapi -lshell32 -lcomctl32 -lole32 -luuid -lshlwapi -lgdi32 -luser32 -ladvapi32
+```
+
+### Engineering notes
+
+- **True alpha, not Acrylic** — the private DWM acrylic API proved ineffective on this Win11 build; per-pixel alpha via PARGB + `ULW_ALPHA` works over static and live wallpapers alike.
+- **Text** — GDI coverage mask → 3× supersample → box-average down → premultiplied composite. Neither GDI+'s soft rasteriser (washed-out stems) nor ClearType (colour fringes on layered windows).
+- **Z-order** — parked just above the desktop host (same band as desktop icons); re-anchored only if buried beneath it. `HWND_BOTTOM` is avoided because it can sink behind the wallpaper.
+- **Settings panel** — a separate owner-drawn `WS_POPUP` glass window; topmost only while active.
+- **Installer** — embeds the exe + manifest, installs to `D:\GlassDock` (falls back to `%LOCALAPPDATA%`), creates shortcuts and an uninstall entry.
+
+### Docs
+
+[Full manual](docs/GLASSDOCK-FULL-MANUAL.md) · [Project guide](docs/PROJECT_GUIDE.md) · [Changelog](docs/P7_CHANGELOG.md) · [Desktop-residency test report](docs/P7_TEST_REPORT.md) · [Implementation plan](docs/P7_IMPLEMENTATION_PLAN.md) · [Embed assessment](docs/DESKTOP-EMBED-ASSESSMENT-2026-11-24.md)
+
+### Known limitations
+
+- Text is fixed light-on-glass; it does not auto-invert over bright wallpapers (dark wallpapers look best).
+- No background blur by design — blurring would require screen capture and break the "living glass"; the opacity slider tints, it does not frost.
+- Verified on Windows 11 26H2 (2560×1440 @125%); Windows 10 is expected to work but not exhaustively tested.
+
+### License
+
+[MIT](LICENSE) © 2026 GlassDock

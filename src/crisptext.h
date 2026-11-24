@@ -116,11 +116,31 @@ inline bool Rasterize(HFONT hf, const std::wstring& text,
     cov.clear(); outW = outH = outOX = outOY = 0;
     if (!hf || text.empty() || boxW <= 0 || boxH <= 0) return false;
 
-    // the scratch has to hold the *whole* layout box so that the alignment
-    // offsets can be computed inside it
-    if (!EnsureScratch(boxW, boxH)) return false;
+    // ---- supersampled rasterisation -------------------------------------
+    // Hinted 1x GDI snaps every stem to the pixel grid: at 13-16 px that makes
+    // neighbouring CJK glyphs land on different grid phases (one char a pixel
+    // taller / fatter than the next) and leaves stair-stepped, "rough" edges.
+    // Rendering the run at SS x and box-averaging back down removes the grid
+    // snap: every glyph keeps its true outline proportion and the edges become
+    // a smooth continuous alpha ramp ("silky"), with no ClearType colour fringe
+    // because we still only ever use the grayscale coverage channel.
+    LOGFONTW lf; ZeroMemory(&lf, sizeof lf);
+    int SS = 3;
+    if (GetObjectW(hf, sizeof lf, &lf) != sizeof lf || lf.lfHeight >= 0) SS = 1;
+    while (SS > 1 && (boxW * SS > 4096 || boxH * SS > 1536)) SS--;
+    HFONT big = NULL;
+    if (SS > 1){
+        LOGFONTW bl = lf;
+        bl.lfHeight = lf.lfHeight * SS;
+        bl.lfQuality = ANTIALIASED_QUALITY;
+        big = CreateFontIndirectW(&bl);
+        if (!big) SS = 1;
+    }
+    HFONT use = big ? big : hf;
 
-    HGDIOBJ oldFont = SelectObject(g_scratch.dc, hf);
+    // pass 1 – measure at SS x (DT_CALCRECT only needs the DC + font)
+    if (!EnsureScratch(16, 16)){ if (big) DeleteObject(big); return false; }
+    HGDIOBJ oldFont = SelectObject(g_scratch.dc, use);
     SetBkMode(g_scratch.dc, OPAQUE);
     SetBkColor(g_scratch.dc, RGB(0, 0, 0));
     SetTextColor(g_scratch.dc, RGB(255, 255, 255));
@@ -128,47 +148,70 @@ inline bool Rasterize(HFONT hf, const std::wstring& text,
     UINT base = DT_SINGLELINE | DT_NOPREFIX | DT_LEFT | DT_TOP;
     if (ellipsis) base |= DT_END_ELLIPSIS;
 
-    // pass 1 – measure exactly the way Windows would lay the run out
-    RECT mr; mr.left = 0; mr.top = 0; mr.right = boxW; mr.bottom = boxH;
+    RECT mr; mr.left = 0; mr.top = 0; mr.right = boxW * SS; mr.bottom = boxH * SS;
     DrawTextW(g_scratch.dc, text.c_str(), -1, &mr, base | DT_CALCRECT);
-    int tw = mr.right - mr.left;
-    int th = mr.bottom - mr.top;
-    if (tw <= 0 || th <= 0){ SelectObject(g_scratch.dc, oldFont); return false; }
-    if (tw > boxW) tw = boxW;
+    int twB = mr.right - mr.left;
+    int thB = mr.bottom - mr.top;
+    if (twB <= 0 || thB <= 0){
+        SelectObject(g_scratch.dc, oldFont); if (big) DeleteObject(big); return false;
+    }
+    if (twB > boxW * SS) twB = boxW * SS;
 
-    int offX = 0, offY = 0;
-    if (hAlign == HCenter)     offX = (boxW - tw) / 2;
-    else if (hAlign == HRight) offX = boxW - tw;
-    if (vAlign == VMiddle)     offY = (boxH - th) / 2;
-    else if (vAlign == VBottom) offY = boxH - th;
-    if (offX < 0) offX = 0;
-    if (offY < 0) offY = 0;
+    int offXB = 0, offYB = 0;
+    if (hAlign == HCenter)     offXB = (boxW * SS - twB) / 2;
+    else if (hAlign == HRight) offXB = boxW * SS - twB;
+    if (vAlign == VMiddle)     offYB = (boxH * SS - thB) / 2;
+    else if (vAlign == VBottom) offYB = boxH * SS - thB;
+    if (offXB < 0) offXB = 0;
+    if (offYB < 0) offYB = 0;
 
-    // pass 2 – rasterise into a tight scratch of the ink size
-    int sw = tw + 2, sh = th + 2;
-    if (!EnsureScratch(sw, sh)){ SelectObject(g_scratch.dc, oldFont); return false; }
+    // pass 2 – rasterise the SS x run into a tight scratch of the ink size
+    int sw = twB + 2, sh = thB + 2;
+    if (!EnsureScratch(sw, sh)){
+        SelectObject(g_scratch.dc, oldFont); if (big) DeleteObject(big); return false;
+    }
     for (int y = 0; y < sh; y++)
         memset(g_scratch.bits + (size_t)y * g_scratch.w * 4, 0, (size_t)g_scratch.w * 4);
-    HGDIOBJ oldFont2 = SelectObject(g_scratch.dc, hf);
+    HGDIOBJ oldFont2 = SelectObject(g_scratch.dc, use);
     SetBkMode(g_scratch.dc, OPAQUE);
     SetBkColor(g_scratch.dc, RGB(0, 0, 0));
     SetTextColor(g_scratch.dc, RGB(255, 255, 255));
-    RECT dr; dr.left = 1; dr.top = 1; dr.right = 1 + tw; dr.bottom = 1 + th;
+    RECT dr; dr.left = 1; dr.top = 1; dr.right = 1 + twB; dr.bottom = 1 + thB;
     DrawTextW(g_scratch.dc, text.c_str(), -1, &dr, base);
     GdiFlush();
     SelectObject(g_scratch.dc, oldFont2);
     SelectObject(g_scratch.dc, oldFont);
+    if (big) DeleteObject(big);
 
-    // pass 3 – harvest the coverage (R channel on black == coverage)
-    cov.assign((size_t)tw * th, 0);
+    // pass 3 – harvest the SS x coverage (R channel on black == coverage)
+    std::vector<BYTE> bigCov((size_t)twB * thB, 0);
     const BYTE* src = g_scratch.bits;
     int stride = g_scratch.w * 4;
-    for (int y = 0; y < th; y++){
+    for (int y = 0; y < thB; y++){
         const BYTE* row = src + (size_t)(y + 1) * stride + 4;   // +1 px border
-        BYTE* dst = &cov[(size_t)y * tw];
-        for (int x = 0; x < tw; x++) dst[x] = row[(size_t)x * 4 + 2];  // R
+        BYTE* dst = &bigCov[(size_t)y * twB];
+        for (int x = 0; x < twB; x++) dst[x] = row[(size_t)x * 4 + 2];  // R
     }
-    outW = tw; outH = th; outOX = offX; outOY = offY;
+
+    // pass 4 – box-average SS x SS blocks down to device pixels.  Averaging the
+    // hinted big render (instead of hinting at 1x) is what makes the edges smooth
+    // and the glyph sizes uniform.
+    int tw = (twB + SS / 2) / SS; if (tw < 1) tw = 1;
+    int th = (thB + SS / 2) / SS; if (th < 1) th = 1;
+    cov.assign((size_t)tw * th, 0);
+    for (int y = 0; y < th; y++){
+        int y0 = y * SS, y1 = y0 + SS; if (y1 > thB) y1 = thB;
+        for (int x = 0; x < tw; x++){
+            int x0 = x * SS, x1 = x0 + SS; if (x1 > twB) x1 = twB;
+            int sum = 0, n = 0;
+            for (int yy = y0; yy < y1; yy++){
+                const BYTE* row = &bigCov[(size_t)yy * twB];
+                for (int xx = x0; xx < x1; xx++){ sum += row[xx]; n++; }
+            }
+            cov[(size_t)y * tw + x] = (BYTE)(n ? sum / n : 0);
+        }
+    }
+    outW = tw; outH = th; outOX = offXB / SS; outOY = offYB / SS;
     return true;
 }
 

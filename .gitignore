@@ -9,8 +9,9 @@ installer/setup.exe
 installer/setup_res.o
 src/resource.o
 
-# release installer (upload to GitHub Releases instead of committing)
-release/
+# release: ship the portable exe + installer in-repo; source zip stays out
+release/*.zip
+release/GlassDock P7.exe
 
 # temporary screenshots / test artifacts
 _*.png
@@ -18,6 +19,7 @@ _*.ico
 
 # dev scratch / debug probes (not part of the product)
 tools/
+build/
 v.png
 HANDOFF.md
 .workbuddy/

@@ -1,10 +1,14 @@
 # GlassDock 项目完整技术交接文档（最新版）
 
+> **现状增补（2026-11-24 晚，P8–P11）**：头部无计数 chip、无刷新按钮（仅齿轮，与文件夹名同中线）；列表实时刷新（`ReadDirectoryChangesW` + 120 ms 去抖，保留展开/滚动）；字体 3x 超采样灰度 AA、13 px；`TitleH=S(30)`、`RowH=S(26)`、`ListTop=TitleH+S(5)`；设置面板 `SET_H=504`、无刷新率行（固定 60 Hz、留白）、无底部提示行；`WM_SNAP` 可导出真 alpha 截图。明细见 `docs/P7_CHANGELOG.md`。
+>
+> `README.md` 已于本轮重写为**中英双语**版，背景描述与当前真透明架构一致（旧版"壁纸层重建+高斯模糊"描述已不存在）。
+
 > 本文档面向接手本项目的开发者 / 智能体，**事无巨细**地记录 GlassDock 当前（2026-11-24 之后）的真实架构、源码结构、构建方式、配置项、渲染管线、已知坑与历史遗留。
 >
-> 本文档与 `src/GlassDock.cpp`（3182 行）、`src/crisptext.h`（281 行）、`installer/setup.cpp`（131 行）逐行对齐。**代码是唯一事实来源**，本文档若与代码冲突，以代码为准。
+> 本文档与 `src/GlassDock.cpp`（2793 行）、`src/crisptext.h`（281 行）、`installer/setup.cpp`（131 行）逐行对齐。**代码是唯一事实来源**，本文档若与代码冲突，以代码为准。
 >
-> ⚠️ 注意：`README.md` 中「功能特性」「技术要点」两节的背景描述（壁纸层重建 + 多级高斯模糊 + 提饱和 + 色调曲线）是**旧版方案**，已废弃。当前版本是**真透明（per-pixel alpha）**架构。详见下文「§4 架构演变与死代码」。
+> ⚠️ 注意：本文部分章节写于 P7 之前；**P8–P11 的现状以文首增补块与 `docs/P7_CHANGELOG.md` 为准**。当前版本是**真透明（per-pixel alpha）**架构，详见下文「§4 架构演变与死代码」。
 
 ---
 
@@ -44,7 +48,7 @@ GlassDock 是一个 **Windows 桌面文件夹小组件**：把一个文件夹的
 
 | 文件 | 职责 |
 | --- | --- |
-| `src/GlassDock.cpp` | 主程序全部逻辑（3182 行），单文件 |
+| `src/GlassDock.cpp` | 主程序全部逻辑（2793 行），单文件 |
 | `src/crisptext.h` | 文字渲染子模块（281 行），GDI 灰度抗锯齿 + 覆盖率合成 + 阴影 |
 | `src/resource.rc` | 图标资源：`1 ICON "D:\\Doubao\\GlassDock\\app.ico"` |
 | `src/app.manifest` | 并行清单：DPI 感知 + Common Controls v6 + 长路径 + asInvoker |
@@ -71,35 +75,30 @@ GlassDock 是一个 **Windows 桌面文件夹小组件**：把一个文件夹的
 
 ---
 
-## 4. 架构演变与死代码（重要，接手前必读）
+## 4. 架构演变（重要，接手前必读）
 
-历史上 GlassDock 走过两套背景方案，**旧方案的代码大部分还留在文件里，但已不在热路径上**。接手者必须能区分"活代码"和"死代码"，否则会误改。
+历史上 GlassDock 走过两套背景方案。**旧方案的代码已于 2026-11-24 整段删除**（净减约 400 行），当前 `GlassDock.cpp` 里不再存在壁纸快照、高斯模糊、屏幕捕获的任何实现。这段历史仍然值得了解——`g_desktopLum` 与 `TextColor()` 的现状就是旧方案留下的唯一痕迹。
 
-### 4.1 旧方案（已废弃）：壁纸快照 + 高斯模糊
+### 4.1 旧方案（已废弃，代码已删除）：壁纸快照 + 高斯模糊
 
-思路：截图/解析壁纸文件 → 高斯模糊 → 上色 → 作为窗口背景绘制。涉及以下函数（**当前均不再被调用，是死代码**）：
+思路：截图/解析壁纸文件 → 高斯模糊 → 上色 → 作为窗口背景绘制。2026-11-24 删除的符号（行号为**删除前**的 3182 行版本，仅供对照备份 `build/GlassDock.cpp.bak.2026-11-24`）：
 
-- `CaptureRegion()`（289 行）
-- `BlurBitmap()`（303 行）
-- `ComputeLuminance()`（343 行）
-- `WallpaperPath()`（369 行）、`WallpaperStamp()`（380 行）、`WallpaperStyle()`（394 行）、`RenderWallpaperLayer()`（408 行）
-- `RefreshDesktopSnapshot()`（481 行）
-- `CropDesktop()`（547 行）
-- `MakeBg()`（595 行）
-- `RebuildMainBg()`（645 行）、`RebuildMainBgLive()`（660 行）
+- 函数：`CaptureRegion`（289）、`BlurBitmap`（303）、`ComputeLuminance`（343）、`WallpaperPath`（369）、`WallpaperStamp`（380）、`FreeWallpaperCache`（387）、`WallpaperStyle`（394）、`RenderWallpaperLayer`（408）、`HideOwnWindows`（461）、`RestoreOwnWindows`（468）、`RefreshDesktopSnapshot`（481）、`WidgetObscured`（519）、`CropDesktop`（547）、`MakeBg`（595）、`RebuildMainBg`（645）、`RebuildMainBgLive`（660）
+- 全局：`g_bg`、`g_screenShot`、`g_screenShotSmall`、`g_vx/g_vy/g_vw/g_vh`、`g_wallImage`、`g_wallPath`、`g_wallStamp`、`g_bgSource`、`g_ssSmallScale`、`g_ssSmallSrc`、`TRANSPARENT_KEY`
+- 退出时对上述三个 Bitmap 的 `delete`
 
-以及全局变量：`g_bg`、`g_screenShot`、`g_screenShotSmall`、`g_vx/g_vy/g_vw/g_vh`、`g_wallImage`、`g_wallPath`、`g_wallStamp`、`g_bgSource`。
+**为什么确认是死代码**：`g_bg` 从未被任何 `DrawImage` 绘制；`RebuildMainBg` / `RebuildMainBgLive` 零调用；`RefreshDesktopSnapshot` 零调用（它才是唯一给 `g_screenShot` 赋值的地方）。`g_desktopLum` 原本只由 `MakeBg` 更新，而 `MakeBg` 无人调用，所以它**恒等于初始值 0.5**，`TextColor()` 因此恒按"中性亮度"返回浅色文字。
 
-**判断依据**：这些函数里，只有 `g_screenShot` 被 `RefreshDesktopSnapshot` 赋值、在退出时 `delete`，但 `g_bg` 从未被任何 `DrawImage` 绘制；`RebuildMainBg`/`RebuildMainBgLive` 没有任何调用者。`g_desktopLum` 只在 `MakeBg` 里被更新（而 `MakeBg` 无人调用），所以它**恒等于初始值 0.5**，进而 `TextColor()` 恒按"中性亮度"返回浅色文字。
+**删除后仍保留的两项**：`RenderBackground()`（活代码，函数体只有 `Repaint()`，被启动流程、`WM_SETTINGCHANGE`、托盘/热键呼出、右键刷新调用）和 `g_desktopLum`（`TextColor()` 的入参）。将来若接"文字颜色随壁纸自适应"，`g_desktopLum` 就是那个需要被真正赋值的变量。
 
-> ⚠️ 已知副作用：`g_desktopLum` 恒为 0.5 意味着文字颜色不会随壁纸明暗自动切换（`TextColorFor(0.5)` 恒返回 `(247,247,250)` 浅色）。这是当前一个真实存在但未被报告的瑕疵。若要让文字颜色随壁纸自适应，需要重新接入"壁纸亮度检测"（但真透明模式下没有壁纸快照可采样，需另想方案，见 §16）。
+> ⚠️ 已知副作用（仍然存在）：`g_desktopLum` 恒为 0.5，文字颜色不会随壁纸明暗切换（`TextColorFor(0.5)` 返回 `(247,247,250)` 浅色）。真透明模式下没有壁纸快照可采样，修复需要新的亮度来源，见 §16。
 
 ### 4.2 旧方案里的模糊强度（已删除）
 
 设置面板原有第 4 个滑块「模糊强度」，驱动一个自绘的磨砂颗粒纹理（frosted grain）。**已彻底删除**：
 - 删除了 `Config::blur` 字段、`DrawFrost()`、`MakeFrostTexture()`、`g_frostTex`。
 - `MakeBg()` 里的 `cfg.blur` 引用改为硬编码 `factor = 1`（因为 `MakeBg` 本身已是死代码，只求编译通过）。
-- 删除位置留了注释：`// ---------------- frost overlay (removed) ----------------`（1318 行）。
+- 删除位置留了注释：`// ---------------- frost overlay (removed) ----------------`（932 行）。
 
 ### 4.3 当前活代码路径
 
@@ -112,7 +111,7 @@ GlassDock 是一个 **Windows 桌面文件夹小组件**：把一个文件夹的
 
 ## 5. 渲染管线（逐层）
 
-### 5.1 主窗口 `PaintAll(Graphics& g, int w, int h)`（1323 行）
+### 5.1 主窗口 `PaintAll(Graphics& g, int w, int h)`（937 行）
 
 执行顺序：
 
@@ -125,24 +124,24 @@ GlassDock 是一个 **Windows 桌面文件夹小组件**：把一个文件夹的
 
 ### 5.2 各绘制函数细节
 
-**`DrawTitle(g, w)`（1103 行）**：
+**`DrawTitle(g, w)`（717 行）**：
 - 左侧文件夹图标 `\uE8B7`（Segoe Fluent Icons / Segoe MDL2 Assets），用 `g_fontGlyphSmall`。
 - 文件夹名（`g_root->name`），`g_fontBold`，左对齐，`StringTrimmingEllipsisCharacter` 截断。
-- 名字后跟一个「N 项」数量胶囊（圆角 chip），当有空间时才显示。
+- 名字后**不再跟数量胶囊**（P9 按用户要求移除）；标题可用宽度放宽到只剩齿轮占位。
 - 标题下方一条 accent 色渐变细线（`LinearGradientBrush` + `SetBlendTriangularShape`），两端淡出。
 - 右侧两个按钮：刷新 `\uE72C`、设置 `\uE713`（`GetButtons` 返回 3 个 RECT，第 3 个是空的——**没有关闭按钮**）。
 
-**`DrawList(g, w, h)`（1187 行）**：
+**`DrawList(g, w, h)`（801 行）**：
 - 裁剪到 body 区（标题栏以下）。
 - 空文件夹显示「（空文件夹）」。
 - 逐行绘制：hover 高亮胶囊 → 目录展开箭头（`\uE70D` 展开 / `\uE76C` 收起）→ 图标（`IconFor`）→ 文字（`it->DisplayName()`，`g_fontUi`）。
 - 行高 `RowH() = S(28)`，标题栏高 `TitleH() = S(36)`，左缩进 `LeftPad() = S(12)`，层级缩进 `Indent() = S(16)`。
 
-**`DrawScrollbar(g, w, h)`（1270 行）**：内容超出才显示，4px 宽圆角条，accent 色渐变。
+**`DrawScrollbar(g, w, h)`（884 行）**：内容超出才显示，4px 宽圆角条，accent 色渐变。
 
-**`DrawFrame(g, w, h)`（1297 行）**：两条同心圆角矩形描边（外圈 alpha 70 白、内圈 alpha 22 白），圆角 `S(12)`，形成玻璃厚边。
+**`DrawFrame(g, w, h)`（911 行）**：两条同心圆角矩形描边（外圈 alpha 70 白、内圈 alpha 22 白），圆角 `S(12)`，形成玻璃厚边。
 
-### 5.3 提交到屏幕 `CommitLayered()`（1618 行）
+### 5.3 提交到屏幕 `CommitLayered()`（1232 行）
 
 1. 计算目标尺寸（resize 中用的是 `cfg.width/height`，否则用 `GetClientRect`）。
 2. `GetLayeredSurface(w,h)`：创建/复用 32bpp top-down DIB section（`CreateDIBSection`，`biHeight = -h`）。
@@ -153,21 +152,21 @@ GlassDock 是一个 **Windows 桌面文件夹小组件**：把一个文件夹的
 6. `UpdateLayeredWindow(hwnd, screen, &dst, &sz, surf, &src, 0, &blend, ULW_ALPHA)`。
    - resize 中 `dst = g_resizePos`（让窗口原子地移动+缩放，防重影）；否则 `dst = GetWindowRect`。
 
-### 5.4 设置面板 `PaintSettings(g, w, h)`（1933 行）
+### 5.4 设置面板 `PaintSettings(g, w, h)`（1547 行）
 
-- 固定逻辑尺寸 `SET_W = 400`、`SET_H = 548`（乘以 `S()` 做 DPI 缩放）。
+- 固定逻辑尺寸 `SET_W = 400`、`SET_H = 516`（乘以 `S()` 做 DPI 缩放）。
 - 背景是**固定** `Color(51, 30, 30, 32)`（约 20% alpha 的深灰 slate），不随组件的不透明度/背景色变化。
 - 文字颜色**固定**浅色 `Color(255, 247, 247, 250)`。
 - 顶部标题「设置」+ 关闭按钮 `\uE8BB` + 分隔线。
 - 内容分区（逻辑 y 坐标，均经 `S()` 缩放）：
   - 文件夹卡片（y=60，高 44）：显示当前文件夹名 + 完整路径 + 「更改…」按钮。
   - 「外观」区（标签 y=112）：**3 个滑块**（宽度 240–1000、高度 240–1200、不透明度 0–100%）。
-  - 「背景色」区（标签 y=344）：6 个预设色板 + 16 进制输入框 + 系统取色器按钮。
-  - 「选项」区（标签 y=404）：开机自启复选框 + 拖动刷新率（6 档 Hz）。
-  - 底部：恢复默认 / 完成 按钮 + 「改动即时生效」提示。
+  - 「背景色」区（标签 y=296）：6 个预设色板 + 16 进制输入框 + 系统取色器按钮。
+  - 「选项」区（标签 y=356）：开机自启复选框；**拖动刷新率行已移除**（P10，固定 60 Hz），原位留白。
+  - 底部提示行（y=430）+ 分隔线（y=452）+ 恢复默认 / 完成 按钮（y=460）+ 「改动即时生效」提示。
   - 顶部 34% 高光（sheen）+ 底部 30% 阴影 + 边框。
 
-### 5.5 设置面板提交 `CommitSetLayered()`（1719 行）
+### 5.5 设置面板提交 `CommitSetLayered()`（1333 行）
 
 与主窗口同构，独立的一套 `g_setLs` / `g_setPaint` / `GetSetLayeredSurface` / `GetSetPaintBitmap`。同样有 alpha 0→1 钳位。
 
@@ -207,11 +206,11 @@ Windows Explorer 画桌面图标标签用的是 GDI ClearType；但本组件是�
 ### 6.3 与主程序的衔接
 
 - `InitFonts()`（222 行）为每个 GDI+ 字体创建对应的 **GDI twin**（`MakeHFont`）：
-  - UI 字体：从 `SPI_GETNONCLIENTMETRICS` 的 `lfMessageFont` 取系统 UI 字体（通常 `Microsoft YaHei UI`），px = `|lfHeight|`，最小 8，若 face 不可用则退回 `Segoe UI`。
-  - `g_fontUi`（常规）、`g_fontBold`（粗体）、`g_fontSmall`（px-1.5）。
+  - UI 字体：**直接从系统取**（`ReadSystemLabelFont`），顺序 ① `HKCU\Control Panel\Desktop\WindowMetrics\IconFont` —— 资源管理器画桌面图标标签用的就是它（本机 = `Microsoft YaHei`，`lfHeight=-12`）→ ② `SPI_GETICONTITLELOGFONT` → ③ `SPI_GETNONCLIENTMETRICS.lfMessageFont`。px = `|lfHeight|`，**注册表来的要乘 `g_scale`**（`IconFont` 存的是 96dpi 单位，-12 在 125% 下要画成 15px 才等于资源管理器列表的字），SPI 来的已是设备像素；钳 8~40，face 名不可用才退回 `Segoe UI`。用户在「显示设置」里改图标字体后，重启小组件即自动跟随。
+  - `g_fontUi`（常规）、`g_fontBold`（粗体）、`g_fontSmall`（`max(px-1.5, 9)`）。
   - 图标字体：`Segoe Fluent Icons`（Win11），不存在则 `Segoe MDL2 Assets`；`g_fontGlyph`(13)、`g_fontGlyphSmall`(11)、`g_fontWatermark`(60，已弃用但仍在创建)。
 - `HFontFor(Font*)`（212 行）把 GDI+ 字体映射回 GDI twin。
-- `DrawTextCrisp(g, s, f, r, sf, br)`（989 行）是所有文字的统一入口：
+- `DrawTextCrisp(g, s, f, r, sf, br)`（603 行）是所有文字的统一入口：
   1. 从 brush 取颜色。
   2. `HFontFor` 找 GDI twin；找不到或 `g_paintDst` 为空 → 回退 `g.DrawString`（旧 GDI+ 路径，兜底）。
   3. 解析 `StringFormat` 的对齐/省略号 → 转成 crisp 的 HAlign/VAlign/ellipsis。
@@ -283,17 +282,17 @@ struct Config {
 
 ### 8.3 缩放（仅右/下/右下角）
 
-- `HitResize()`（2620 行）**只允许** `RS_E`（右）、`RS_S`（下）、`RS_SE`（右下）。左/上边及所有与之相邻的角被禁用。
+- `HitResize()`（2234 行）**只允许** `RS_E`（右）、`RS_S`（下）、`RS_SE`（右下）。左/上边及所有与之相邻的角被禁用。
 - 原因（代码注释）：左/上缩放会移动窗口原点，逐像素透明窗口原点移动会在指针下留残影、抖动；右/下缩放只改尺寸、原点不动，稳定。
 - resize 中：**不调 `SetWindowPos`**，而是设 `g_resizeHasPos = true`、`g_resizePos = (nx,ny)`，让 `CommitLayered` 通过 `UpdateLayeredWindow` 的 `pptDst`/`psize` 原子地移动+缩放，防"双像重影"。
 - 最小尺寸 `S(200)×S(160)`，最大受工作区限制。
-- `KeepOnScreen()`（2295 行）：放大靠近屏幕边缘时贴回可见区。
+- `KeepOnScreen()`（1909 行）：放大靠近屏幕边缘时贴回可见区。
 
 ### 8.4 按钮
 
 `GetButtons(w, out[3])`：右侧两个按钮 = 刷新(0)、设置(1)；第 3 个(2) 恒为空 RECT（**没有关闭按钮**，避免误点消失）。
 
-- 刷新按钮 → `Reload()` + `RenderBackground()`。
+- 刷新按钮 **已移除**（P9）：改为 `ReadDirectoryChangesW` 递归监听 + `WM_LIVE`/`TIMER_LIVE` 120 ms 去抖 → `LiveReload()`（保留展开与滚动）。
 - 设置按钮 → `OpenSettings()`。
 
 ---
@@ -310,22 +309,22 @@ struct Config {
 | 滑块轨道 y（3 个）`SliderTrackY` | {162, 214, 266} |
 | 滑块标签 y（3 个）`SliderLabelY` | {140, 192, 244} |
 | 滑块命中区 y（3 个）`R_SliderHit` | {162, 214, 266} |
-| 色板 `R_Preset(i)` | (20 + i*38, 366, 30, 30) |
-| 16 进制框 `R_HexBox` | (250, 366, 84, 30) |
-| 取色器 `R_CustomColor` | (338, 366, 30, 30) |
-| 自启复选框 `R_CheckAuto` | (18, 424, 344, 24) |
-| Hz 标签 `R_HzLabel` | (20, 450, 120, 20) |
-| Hz 选项 `R_HzOption(i)` | (110 + i*44, 448, 38, 24) |
-| 恢复默认 `R_Reset` | (20, 492, 100, 34) |
-| 完成 `R_Done` | (284, 492, 84, 34) |
+| 色板 `R_Preset(i)` | (20 + i*38, 318, 30, 30) |
+| 16 进制框 `R_HexBox` | (250, 318, 84, 30) |
+| 取色器 `R_CustomColor` | (338, 318, 30, 30) |
+| 自启复选框 `R_CheckAuto` | (18, 376, 344, 24) |
+| Hz 标签 `R_HzLabel` | (20, 402, 120, 20) |
+| Hz 选项 `R_HzOption(i)` | (110 + i*44, 400, 38, 24) |
+| 恢复默认 `R_Reset` | (20, 460, 100, 34) |
+| 完成 `R_Done` | (284, 460, 84, 34) |
 
-### 9.2 命中枚举 `SH_*`（1800 行）
+### 9.2 命中枚举 `SH_*`（1414 行）
 
 ```
 SH_NONE, SH_CLOSE, SH_FOLDER,
 SH_SLIDER0(宽), SH_SLIDER1(高), SH_SLIDER2(不透明度),   // 3 个滑块
 SH_P0..SH_P5(色板), SH_CUSTOM, SH_HEX, SH_AUTO,
-SH_HZ0..SH_HZ5(刷新率), SH_RESET, SH_DONE
+SH_RESET, SH_DONE   // P10 起无 SH_HZ0..5
 ```
 
 ### 9.3 滑块语义（`SetSliderFromX`，2284 行）
@@ -352,10 +351,10 @@ SH_HZ0..SH_HZ5(刷新率), SH_RESET, SH_DONE
 
 ## 10. 桌面驻留机制
 
-核心函数 `SitOnDesktop()`（1431 行）：
+核心函数 `SitOnDesktop()`（1045 行）：
 
 1. 窗口扩展样式：去掉 `WS_EX_TOPMOST`，加上 `WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW`。
-2. 找壁纸宿主窗口 `GetDesktopWorkerW()`（1411 行）：
+2. 找壁纸宿主窗口 `GetDesktopWorkerW()`（1025 行）：
    - 优先 `FindWindow("Progman")`（Win10/11 桌面图标是 Progman 的子窗口）。
    - 回退：找含 `SHELLDLL_DefView` 的 `WorkerW`，再退任意 `WorkerW`。
 3. 目标插入位置 = `GetWindow(host, GW_HWNDPREV)`（宿主上方紧邻的窗口），无则 `HWND_TOP`。
@@ -369,16 +368,16 @@ SH_HZ0..SH_HZ5(刷新率), SH_RESET, SH_DONE
 - 每 5 tick 重新 `SitOnDesktop()` 一次（除非正在拖动/缩放）。
 - 用户主动隐藏（`g_userHidden = true`）后停止干预。
 
-**`WM_SETTINGCHANGE` / `RenderBackground()`**：当前真透明模式下 `RenderBackground()`（674 行）只是 `Repaint()`，没有实际背景可刷新。
+**`WM_SETTINGCHANGE` / `RenderBackground()`**：当前真透明模式下 `RenderBackground()`（288 行）只是 `Repaint()`，没有实际背景可刷新。
 
 ---
 
 ## 11. 托盘 / 热键 / 单实例
 
 - **单实例**：命名互斥体 `Local\GlassDock_SingleInstance`；二次启动时 `PostMessage(WM_SHOWME)` 给已有窗口，然后退出。
-- **托盘**：`AddTrayIcon()`（2699 行）`Shell_NotifyIcon(NIM_ADD)`，图标 = 资源 id 1。左键/双击 → `ToggleWidget()`；右键 → `ShowTrayMenu()`。
+- **托盘**：`AddTrayIcon()`（2313 行）`Shell_NotifyIcon(NIM_ADD)`，图标 = 资源 id 1。左键/双击 → `ToggleWidget()`；右键 → `ShowTrayMenu()`。
 - **热键**：`RegisterHotKey(hwnd, 1, MOD_CONTROL|MOD_ALT, 'G')` = `Ctrl+Alt+G`。
-- **`ToggleWidget()`**（2741 行）实际上**只显示、不切换**：因为被压到壁纸下的窗口 `IsWindowVisible` 仍为 TRUE，基于可见性的 toggle 不可靠。所以热键/托盘/二次启动都是"确保显示并回桌面层"。
+- **`ToggleWidget()`**（2355 行）实际上**只显示、不切换**（函数体等价 `ShowWidget()`）：因为被压到壁纸下的窗口 `IsWindowVisible` 仍为 TRUE，基于可见性的 toggle 不可靠。所以热键/托盘/二次启动都是"确保显示并回桌面层"，**不设 `TOPMOST`、不隐藏**（托盘气泡文案里的「显示 / 隐藏」是历史措辞，实际只做显示）。
 - **隐藏**：右键菜单「隐藏到托盘」→ `HideWidget()`（`SW_HIDE` + `g_userHidden=true`）+ 托盘气泡提示一次。
 - **托盘菜单**：显示/隐藏小组件、打开设置、退出。
 
@@ -474,7 +473,7 @@ g++ -mwindows -municode -O2 -s -static \
 | 左缩进 `LeftPad()` | `S(12)` | |
 | 层级缩进 `Indent()` | `S(16)` | |
 | 圆角半径 | `S(12)` | 主窗口边框/tint |
-| 设置面板尺寸 | `400 × 548`（逻辑） | `SET_W/SET_H` |
+| 设置面板尺寸 | `400 × 516`（逻辑） | `SET_W/SET_H` |
 | 设置面板背景 | `Color(51,30,30,32)` | ~20% 深灰 slate |
 | 主文字色（浅） | `Color(255,247,247,250)` | `TextColor()` 恒返此值 |
 | 文字阴影 alpha | 85（~33%） | `DrawTextCrisp` 里 `shAlpha` |
@@ -494,44 +493,45 @@ g++ -mwindows -municode -O2 -s -static \
 
 ## 16. 给接手者的修改建议
 
-1. **清理死代码**（可选，降低理解成本）：§4.1 列出的整条旧背景链（`CaptureRegion`/`BlurBitmap`/`MakeBg`/`CropDesktop`/`RebuildMainBg*`/`RefreshDesktopSnapshot`/`RenderWallpaperLayer` 等）以及 `g_bg`/`g_screenShot*`/`g_wall*` 全局，可以安全删除——它们没有任何活跃调用。删除后 `g_desktopLum`、`TextColorFor` 的 lum 参数逻辑也可简化。
+1. **死代码已清理（2026-11-24 已完成）**：§4.1 列出的整条旧背景链与相关全局已从文件中删除，`GlassDock.cpp` 由 3182 行降到 2793 行。删除前后各编译一次，用 `PrintWindow` 抓同一窗口做逐像素对比，结果**0 像素差异**（文本色像素数 2334，完全一致）。若需回滚，备份在 `build/GlassDock.cpp.bak.2026-11-24`。
 
 2. **文字颜色自适应壁纸**：若要恢复"浅色壁纸→深字，深色壁纸→浅字"，需在真透明模式下另找壁纸亮度来源（例如对 `WallpaperPath()` 的壁纸文件采样亮度，而非截屏——但注意动态壁纸无法这样处理）。这是当前唯一已知的功能缺口。
 
 3. **重新生成截图**：`docs/screenshot.png`、`docs/settings.png` 是旧版（含已删的「模糊强度」滑块）。若在意，可运行最新版后重新截图替换。
 
-4. **README 更新**：`README.md` 的「功能特性」第 14、17、18 行及「技术要点」第 120、121、123 行描述的"壁纸层重建 + 高斯模糊 + 提饱和 + 色调曲线"是旧方案，与当前真透明架构不符，建议按本文档 §3、§5 重写。
+4. **README 状态（2026-11-24 复核）**：`README.md` 已于 11-24 19:05 追平真透明架构——「技术要点」第 120/121/123 行的描述**是正确的**，本节原先"第 14、17、18 / 120、121、123 行仍是旧方案"的判断已过时。本次只修正了剩余措辞（第 3 行「毛玻璃 / 亚克力」、第 17 行「文字颜色自动适配」、第 20 行「同一套毛玻璃质感」）与呼出行为描述（第 45 / 54 / 119 行），并补上「拖动刷新率」设置项。
 
 5. **DPI 感知**：当前用 `SetProcessDPIAware()`（系统级），不是 per-monitor v2。多显示器不同缩放比下可能模糊，若要升级需改 manifest + `SetProcessDpiAwarenessContext` 并用 `S()` 缩放（已预留 `g_scale`）。
 
-6. **删除「模糊强度」后设置面板留白**：删掉第 4 个滑块后，「外观」区（3 个滑块）与「背景色」区（固定 y=344）之间有约 50px 空档。若要填平，需整体上移「背景色」「选项」区块的所有 `R_*` 常量（§9.1）。
+6. **设置面板留白已填平（2026-11-24 已完成）**：删除「模糊强度」滑块留下的 66px 空档，已按"「背景色」及其下所有区块整体上移 48px + 面板高度 548→516"的方案填平，区块内部相对间距不变。顺带修正了两个旧瑕疵：底部提示行（原 y=470）与分隔线（原 y=478）本来有 2px 重叠，现改为提示 y=430 / 分隔线 y=452 / 按钮 y=460。
 
 ---
 
 ## 附录：源代码关键符号索引
 
-| 符号 | 行号（GlassDock.cpp） | 说明 |
+| 符号 | 行号（GlassDock.cpp，2026-11-24 清理后 2793 行版本） | 说明 |
 | --- | --- | --- |
 | `Config` / `cfg` | 39 / 51 | 配置 |
 | `LoadConfig` / `SaveConfig` / `SavePos` | 112 / 146 / 160 | |
 | `InitFonts` / `HFontFor` | 222 / 212 | 字体 + GDI twin |
-| `AlphaBitmapFromHIcon` | 782 | 图标透明重建 |
-| `GetShellIcon` / `IconFor` | 911 / 927 | 图标获取/缓存 |
-| `TextColorFor` / `TextColor` / `AccentSolid` / `AccentHi` | 962 / 968 / 969 / 972 | 颜色 |
-| `DrawTextCrisp` | 989 | 文字统一入口 |
-| `DrawTitle` / `DrawList` / `DrawScrollbar` / `DrawFrame` | 1103 / 1187 / 1270 / 1297 | 绘制 |
-| `PaintAll` | 1323 | 主窗口绘制总入口 |
-| `OpenItem` / `Toggle` / `Reload` | 1375 / 1379 / 1388 | 动作 |
-| `GetDesktopWorkerW` / `SitOnDesktop` | 1411 / 1431 | 桌面驻留 |
-| `PickFolder` | 1466 | 文件夹选择器 |
-| `GetPaintBitmap` / `CopyPaintToDIB` / `CommitLayered` / `Repaint` | 1536 / 1598 / 1618 / 1665 | 主窗口分层提交 |
-| `GetSetPaintBitmap` / `CommitSetLayered` / `RepaintSet` | 1711 / 1719 / 1764 | 设置面板分层提交 |
-| `PaintSettings` | 1933 | 设置面板绘制 |
-| `SetHit` / `SetSliderFromX` | 2270 / 2284 | 设置面板命中/滑块 |
-| `OpenSettings` | 2568 | 打开设置 |
-| `HitResize` / `SetCursors` | 2620 / 2653 | 缩放命中/光标 |
-| `ShowContextMenu` | 2669 | 右键菜单 |
-| `AddTrayIcon` / `ShowTrayMenu` | 2699 / 2759 | 托盘 |
-| `WndProc` | 2776 | 主窗口消息循环 |
-| `RunUninstall` | 3032 | 卸载 |
-| `wWinMain` | 3072 | 入口 |
+| `AlphaBitmapFromHIcon` | 396 | 图标透明重建 |
+| `GetShellIcon` / `IconFor` | 525 / 541 | 图标获取/缓存 |
+| `TextColorFor` / `TextColor` / `AccentSolid` / `AccentHi` | 576 / 582 / 583 / 586 | 颜色 |
+| `DrawTextCrisp` | 603 | 文字统一入口 |
+| `DrawTitle` / `DrawList` / `DrawScrollbar` / `DrawFrame` | 717 / 801 / 884 / 911 | 绘制 |
+| `PaintAll` | 937 | 主窗口绘制总入口 |
+| `OpenItem` / `Toggle` / `Reload` | 989 / 993 / 1002 | 动作 |
+| `GetDesktopWorkerW` / `SitOnDesktop` | 1025 / 1045 | 桌面驻留 |
+| `PickFolder` | 1080 | 文件夹选择器 |
+| `GetPaintBitmap` / `CopyPaintToDIB` / `CommitLayered` / `Repaint` | 1150 / 1212 / 1232 / 1279 | 主窗口分层提交 |
+| `GetSetPaintBitmap` / `CommitSetLayered` / `RepaintSet` | 1325 / 1333 / 1378 | 设置面板分层提交 |
+| `PaintSettings` | 1547 | 设置面板绘制 |
+| `SetHit` / `SetSliderFromX` | 1884 / 1898 | 设置面板命中/滑块 |
+| `KeepOnScreen` | 1909 | 贴回可见区 |
+| `OpenSettings` | 2182 | 打开设置 |
+| `HitResize` / `SetCursors` | 2234 / 2267 | 缩放命中/光标 |
+| `ShowContextMenu` | 2283 | 右键菜单 |
+| `AddTrayIcon` / `HideWidget` / `ToggleWidget` / `ShowTrayMenu` | 2313 / 2344 / 2355 / 2373 | 托盘与显隐 |
+| `WndProc` | 2390 | 主窗口消息循环 |
+| `RunUninstall` | 2646 | 卸载 |
+| `wWinMain` | 2686 | 入口 |
