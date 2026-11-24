@@ -1,0 +1,29 @@
+# build intermediates
+*.o
+*.res
+*.exe.manifest
+
+# compiled binaries
+GlassDock.exe
+installer/setup.exe
+installer/setup_res.o
+src/resource.o
+
+# release installer (upload to GitHub Releases instead of committing)
+release/
+
+# temporary screenshots / test artifacts
+_*.png
+_*.ico
+
+# dev scratch / debug probes (not part of the product)
+tools/
+v.png
+HANDOFF.md
+.workbuddy/
+
+# OS / editor
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
