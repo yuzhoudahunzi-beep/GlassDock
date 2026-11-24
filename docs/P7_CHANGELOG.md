@@ -154,3 +154,22 @@
 
 验证：编译 0 error；替换两处 exe 重启；p11_settings_accent.png 确认无刷新率行、
 留白在"开机自动启动"与底部分隔线之间、HEX=#243447。
+
+## P11 文档 / 截图 / GitHub 交付（2026-11-24 深夜）
+
+用户："整个完美的上传 github，文档也写好，截图你自己来，全权交给你，文章开头中英两版，写漂亮点。"
+
+- **README 重写**：中英双语（`#中文` / `#english` 锚点），居中 hero 图 + badges + 特性/截图/安装/设置/构建/技术要点/文档索引/已知限制/许可；
+  所有描述追平 P8–P11 现状（无刷新按钮、实时监听、固定 60Hz、3x 超采样字体、无 chip）。
+- **真 alpha 截图**：新增 `WM_SNAP`(WM_APP+96) —— 重渲染 PARGB 表面、反预乘、导出带真实 alpha 的 PNG
+  （`%APPDATA%\GlassDock\snap_widget.png / snap_settings.png`）。PrintWindow 对分层窗口返回不透明合成，
+  无法表现真透明，故弃用屏幕直抓（会拍进前台聊天窗口）。截图 = 真 alpha 层 + 当前壁纸合成，
+  产出 `docs/screenshots/{hero,widget,settings,header}.png`，并刷新旧 `docs/screenshot.png / settings.png`。
+- **文档追平**：FULL-MANUAL 与 PROJECT_GUIDE 文首加「P8–P11 现状增补」块，并订正标题栏/刷新率/chip/枚举行；
+  历史测试报告与计划保持原样（作为记录）。
+- **构建同步**：`build.ps1` 全链路重跑（主程序 + 安装器内嵌最新 exe），`release/GlassDock.exe`（便携）与
+  `release/GlassDock-Setup-1.0.0.exe`（安装版）同步替换运行副本。
+- **上传**：本机无 git 二进制，改用 GitHub Git Data API（凭据取自 `~/.git-credentials`，未外泄）：
+  blobs → tree(base_tree) → commit → ref 更新，main `e5fcdaa → 92b8cd3`；
+  标签 `v1.1.0` + Release（中英简介）+ 两个 exe 资产。远端 tree 26 blob 校验通过。
+  发布脚本留存于 `publish-github.ps1`（可重复执行，幂等跳过已存在资产）。
